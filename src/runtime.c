@@ -1,5 +1,5 @@
-// 2026 COPYRIGHT BY "VULPIN SOFTWARE.CC" ALL RIGHT REVERSED.
-// MIT LICENCE
+// Copyright (c) 2026 "VULPIN SOFTWARE.CC". All rights reserved.
+// SPDX-License-Identifier: MIT
 
 #include <stdio.h>
 #include <string.h>
