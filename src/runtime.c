@@ -1,8 +1,10 @@
 #include <stdio.h>
 
-int main(int argc, char *argv[]) {
-    if (argc > 1) {
-        printf("Received: %s\n", argv[1]);
-    }
+int main() {
+    char text[100];
+
+    scanf("%99s", text);        // Read from Python
+    printf("Hello %s\n", text); // Send back to Python
+
     return 0;
 }
