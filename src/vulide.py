@@ -2,7 +2,7 @@ import subprocess
 
 result = subprocess.run(
     ["./main"],
-    input="Armin",
+    input="BatScript",
     text=True,
     capture_output=True
 )
