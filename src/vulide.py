@@ -1,10 +1,10 @@
-#include <stdio.h>
+import subprocess
 
-int main() {
-    char text[100];
+result = subprocess.run(
+    ["./main"],
+    input="Armin",
+    text=True,
+    capture_output=True
+)
 
-    scanf("%99s", text);        // Read from Python
-    printf("Hello %s\n", text); // Send back to Python
-
-    return 0;
-}
+print(result.stdout)
