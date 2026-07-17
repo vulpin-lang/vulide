@@ -1,2 +1,2 @@
-:: For make vulpin callable in Windoes
+:: For make vulpin callable in Windows
 :: Like: vulpin [command]
