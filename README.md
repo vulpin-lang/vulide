@@ -10,7 +10,9 @@ It made writing Codes easier to who want's code in vulpin!
 
 - At first you have to download vulpin on here:
   https://github.com/vulpin-lang/Vulpin/
+- Then Install Vulpin on your system, you can follow vulpin installition guide on Readme:
 
+https://github.com/vulpin-lang/Vulpin/blob/General/README.md
 
   ### dont forget! Vulide Release and Vulide Release Should be Match!
 
