@@ -23,4 +23,19 @@ Vulide has many options that it allows you to use blueprints and Algorithm viewe
 
 Blueprints makes coding easier for everyone!
 
-***UN COMPLITED README***
+## Visual Canvas
+
+<img width="1750" height="599" alt="image" src="https://github.com/user-attachments/assets/99a0ce73-bf6d-4528-860a-0b178d9dbf57" />
+
+## Algorithm Viewer
+<img width="1384" height="181" alt="image" src="https://github.com/user-attachments/assets/4865700d-7ff8-4c84-a9ac-41fc7b688098" />
+
+## Themes pack
+- You can see themes of:
+  - Light (Catppuccin Latte)
+  - Dracula
+  - Nord
+  - Solarized Dark
+  - Monokai
+
+And more stuff that you would try it!
