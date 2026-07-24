@@ -15,7 +15,8 @@ It made writing Codes easier to who want's code in vulpin!
 https://github.com/vulpin-lang/Vulpin/blob/General/README.md
 
   ### dont forget! Vulide Release and Vulide Release Should be Match!
-
+- Then Download and install Python
+- Then Download and install PyQT5
 # What's in Vulide
 
 Vulide has many options that it allows you to use blueprints and Algorithm viewer and VC and Terminal!
