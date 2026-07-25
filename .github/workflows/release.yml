@@ -1,0 +1,36 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          mkdir -p build
+
+          # Replace this with your real build command.
+          # Examples:
+          # make
+          # cmake -B build && cmake --build build
+          # cargo build --release
+
+          cp path/to/compiler build/vulpin
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulpin-linux
+          path: build/
