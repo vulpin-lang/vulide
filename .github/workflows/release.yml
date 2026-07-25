@@ -1,4 +1,4 @@
-name: Build & Release
+name: Build
 
 on:
   push:
@@ -6,31 +6,29 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  linux:
-    runs-on: ubuntu-latest
+  windows:
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
         run: |
-          mkdir -p build
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if exist requirements.txt pip install -r requirements.txt
 
-          # Replace this with your real build command.
-          # Examples:
-          # make
-          # cmake -B build && cmake --build build
-          # cargo build --release
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile main.py
 
-          cp path/to/compiler build/vulpin
-
-      - name: Upload build artifact
+      - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: vulpin-linux
-          path: build/
+          name: Vulpin-Windows
+          path: dist/*
