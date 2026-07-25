@@ -16,7 +16,7 @@ https://github.com/vulpin-lang/Vulpin/blob/General/README.md
 
   ### dont forget! Vulide Release and Vulide Release Should be Match!
   - Download and Install Vulide:
-    ```
+    ```bash
     pip install vulide
     ```
 # What's in Vulide
