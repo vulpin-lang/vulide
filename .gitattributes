@@ -1,0 +1,4 @@
+dist/** -diff -merge
+dist/*.AppImage binary
+dist/*.zip binary
+dist/*.tar.gz binary
