@@ -10,37 +10,41 @@ It made writing Codes easier to who want's code in vulpin!
 
 - At first you have to download vulpin on here:
   https://github.com/vulpin-lang/Vulpin/
-- Then Install Vulpin on your system, you can follow vulpin installition guide on Readme:
+- Then Install Vulpin on your system, you can follow Vulpin Installation guide on README:
 
 https://github.com/vulpin-lang/Vulpin/blob/General/README.md
 
-  ### dont forget! Vulide Release and Vulide Release Should be Match!
-  - Download and Install Vulide:
-    ```bash
-    pip install vulide
-    ```
+Then Download and Install Vulide by going to this link and clicking the download button: 
+If you're on windows: https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-x86_64-windows.zip
+Then extract it and open the EXE!
+
+If you're on Linux (64-86): https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-x86_64.AppImage
+Then open it
+
+If you're on Linux (ARM): https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-aarch64-linux.tar.gz
+Then untar it and open it!
+
 # What's in Vulide
 
-Vulide has many options that it allows you to use blueprints and Algorithm viewer and VC and Terminal!
+VulIDE has many cool features that let you write code easier!
 
-## Blueprints
-<img width="1079" height="318" alt="image" src="https://github.com/user-attachments/assets/b6d545e0-2d0c-49d7-91da-e37a8d956582" />
+## Autocomplete
 
-Blueprints makes coding easier for everyone!
+<img width="403" height="202" alt="image" src="https://github.com/user-attachments/assets/00538f10-3ff7-4062-a47a-05471e59e5c5" />
 
-## Visual Canvas
+## File Tree
 
-<img width="1750" height="599" alt="image" src="https://github.com/user-attachments/assets/99a0ce73-bf6d-4528-860a-0b178d9dbf57" />
+<img width="369" height="500" alt="image" src="https://github.com/user-attachments/assets/50950d88-ba7d-4fdf-b990-b69fdb10db0d" />
 
 ## Algorithm Viewer
-<img width="1384" height="181" alt="image" src="https://github.com/user-attachments/assets/4865700d-7ff8-4c84-a9ac-41fc7b688098" />
+<img width="587" height="150" alt="image" src="https://github.com/user-attachments/assets/869958f3-03bf-4c5a-8533-f26a9dd10a4e" />
+
 
 ## Themes pack
 - You can see themes of:
+  - Dark (Catppuccin Mocha)
   - Light (Catppuccin Latte)
   - Dracula
   - Nord
   - Solarized Dark
   - Monokai
-
-And more stuff that you would try it!
