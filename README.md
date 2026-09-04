@@ -15,13 +15,17 @@ It made writing Codes easier to who want's code in vulpin!
 https://github.com/vulpin-lang/Vulpin/blob/General/README.md
 
 Then Download and Install Vulide by going to this link and clicking the download button: 
+
 If you're on windows: https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-x86_64-windows.zip
+
 Then extract it and open the EXE!
 
 If you're on Linux (64-86): https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-x86_64.AppImage
+
 Then open it
 
 If you're on Linux (ARM): https://github.com/vulpin-lang/vulide/blob/main/dist/VulIDE-0.2.0-ge45825e-aarch64-linux.tar.gz
+
 Then untar it and open it!
 
 # What's in Vulide
@@ -48,3 +52,10 @@ VulIDE has many cool features that let you write code easier!
   - Nord
   - Solarized Dark
   - Monokai
+
+## Keys
+Ctrl+H: Show a list of all possible keys
+Ctrl+N: Create a New tab
+Ctrl+S: Save
+Ctrl+Q: quit
+and more!...
