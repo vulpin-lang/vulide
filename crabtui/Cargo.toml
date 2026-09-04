@@ -1,0 +1,18 @@
+[package]
+name = "vulide"
+version = "0.2.0"
+edition = "2024"
+description = "A terminal UI for the Vulpin language"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/vulpin-lang/vulide"
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+ropey = "1.6.1"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.5"
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"

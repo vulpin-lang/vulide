@@ -1,6 +1,6 @@
 # VulIDE (crabtui) — v0.2.0 review builds
 
-**Commit:** `e45825e` on `vulide-tui/` master (repo: `youssefahmed2017/vulide-crabtui`).
+**Source:** `crabtui/` in this repo (`vulpin-lang/vulide`), from `vulide-tui` commit `e45825e`.
 **Language:** Rust (edition 2024). Deps: ratatui + crossterm + ropey + toml +
 serde + anyhow + unicode-{segmentation,width} — the crate has no C dependencies.
 

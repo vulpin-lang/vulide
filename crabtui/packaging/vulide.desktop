@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VulIDE
+GenericName=Vulpin IDE
+Comment=Terminal IDE for the Vulpin language
+Exec=vulide %F
+Icon=vulide
+Terminal=true
+Categories=Development;IDE;TextEditor;
+MimeType=text/x-vulpin;
+Keywords=vulpin;editor;code;tui;

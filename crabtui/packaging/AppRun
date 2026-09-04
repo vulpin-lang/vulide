@@ -1,0 +1,29 @@
+#!/bin/sh
+# VulIDE is a terminal app. Run directly when we already have a TTY; otherwise
+# (double-clicked from a file manager) relaunch inside a terminal emulator.
+set -u
+HERE="$(dirname "$(readlink -f "$0")")"
+BIN="$HERE/usr/bin/vulide"
+
+if [ -t 0 ] && [ -t 1 ]; then
+    exec "$BIN" "$@"
+fi
+
+for T in x-terminal-emulator konsole alacritty kitty foot wezterm ghostty \
+         gnome-terminal xfce4-terminal tilix lxterminal mate-terminal \
+         st urxvt xterm; do
+    command -v "$T" >/dev/null 2>&1 || continue
+    case "$T" in
+        gnome-terminal|tilix) exec "$T" -- "$BIN" "$@" ;;
+        wezterm)              exec "$T" start -- "$BIN" "$@" ;;
+        ghostty)              exec "$T" -e "$BIN" "$@" ;;
+        *)                    exec "$T" -e "$BIN" "$@" ;;
+    esac
+done
+
+MSG="VulIDE is a terminal application. Open a terminal and run:
+  $(basename "${APPIMAGE:-$0}") <file.vul>"
+echo "$MSG" >&2
+command -v zenity  >/dev/null 2>&1 && zenity --error --no-wrap --text="$MSG" 2>/dev/null
+command -v notify-send >/dev/null 2>&1 && notify-send "VulIDE" "$MSG" 2>/dev/null
+exit 2
