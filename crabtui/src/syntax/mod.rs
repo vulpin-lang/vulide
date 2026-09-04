@@ -6,6 +6,7 @@
 //! opens or closes. The Python IDE's highlighter is line-based too.
 
 pub mod generic;
+pub mod markdown;
 pub mod vulpin;
 
 use std::path::Path;
@@ -34,6 +35,10 @@ pub enum TokenKind {
     Keyword,
     Operator,
     Bracket,
+    /// A Markdown heading line.
+    Heading,
+    /// Markdown bold / emphasis.
+    Emphasis,
     Text,
 }
 
@@ -46,6 +51,10 @@ pub enum Language {
     Python,
     Rust,
     C,
+    Shell,
+    Toml,
+    Json,
+    Markdown,
     /// Anything we don't have a grammar for — rendered without highlighting.
     Plain,
 }
@@ -62,6 +71,10 @@ impl Language {
             Some("py" | "pyw" | "pyi") => Language::Python,
             Some("rs") => Language::Rust,
             Some("c" | "h") => Language::C,
+            Some("sh" | "bash" | "zsh" | "ksh") => Language::Shell,
+            Some("toml") => Language::Toml,
+            Some("json" | "jsonc" | "json5") => Language::Json,
+            Some("md" | "markdown" | "mkd") => Language::Markdown,
             _ => Language::Plain,
         }
     }
@@ -72,6 +85,10 @@ impl Language {
             Language::Python => "Python",
             Language::Rust => "Rust",
             Language::C => "C",
+            Language::Shell => "Shell",
+            Language::Toml => "TOML",
+            Language::Json => "JSON",
+            Language::Markdown => "Markdown",
             Language::Plain => "Plain",
         }
     }
@@ -84,6 +101,10 @@ impl Language {
             Language::Python => generic::tokenize(line, &generic::PYTHON),
             Language::Rust => generic::tokenize(line, &generic::RUST),
             Language::C => generic::tokenize(line, &generic::C),
+            Language::Shell => generic::tokenize(line, &generic::SHELL),
+            Language::Toml => generic::tokenize(line, &generic::TOML),
+            Language::Json => generic::tokenize(line, &generic::JSON),
+            Language::Markdown => markdown::tokenize(line),
             Language::Plain => Vec::new(),
         }
     }

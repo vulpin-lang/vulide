@@ -281,6 +281,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Overlay::Palette(palette) => Some(palette::render(f, palette, &app.theme, area)),
         Overlay::ThemePicker(picker) => Some(theme_picker::render(f, picker, &app.theme, area)),
         Overlay::Help(h) => Some(help::render(f, h, &app.theme, area)),
+        Overlay::Confirm(c) => Some(overlay::render_confirm(f, c, &app.theme, area)),
         Overlay::None => None,
     };
 }

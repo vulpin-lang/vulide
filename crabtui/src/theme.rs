@@ -158,6 +158,8 @@ impl Theme {
             TokenKind::Keyword => self.keyword,
             TokenKind::Operator => self.operator,
             TokenKind::Bracket => self.bracket,
+            TokenKind::Heading => self.accent,
+            TokenKind::Emphasis => self.function,
             TokenKind::Text => return None,
         })
     }

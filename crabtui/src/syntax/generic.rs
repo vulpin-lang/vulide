@@ -10,8 +10,15 @@ pub struct LangSpec {
     pub block_comment: Option<(&'static str, &'static str)>,
     /// `'x'` / `'\n'` treated leniently as a short string (skips Rust lifetimes).
     pub char_literal: bool,
+    /// `'…'` is a full literal string with no escapes (shell, TOML).
+    pub single_quote_string: bool,
     /// A `#word` at the first non-space column is a directive (C preprocessor).
     pub hash_directive: bool,
+    /// `$name` / `${name}` / `$1` / `$?` are variables (shell).
+    pub dollar_vars: bool,
+    /// A line that starts (after indent) with `[` is a section header — the
+    /// whole `[…]` / `[[…]]` run is highlighted (TOML).
+    pub bracket_headers: bool,
 }
 
 const OP_CHARS: &str = "+-*/%<>=!&|^~?:.";
@@ -36,6 +43,43 @@ pub fn tokenize(line: &str, spec: &LangSpec) -> Vec<Token> {
         if !spec.line_comment.is_empty() && starts_with(i, spec.line_comment) {
             push(&mut tokens, i, n, TokenKind::Comment);
             break;
+        }
+
+        // TOML section header: a line that opens with `[` or `[[`.
+        if spec.bracket_headers && first_non_ws == Some(i) && c == '[' {
+            let mut j = i + 1;
+            while j < n && chars[j] != ']' {
+                j += 1;
+            }
+            while j < n && chars[j] == ']' {
+                j += 1;
+            }
+            push(&mut tokens, i, j.min(n), TokenKind::Keyword);
+            i = j.min(n);
+            continue;
+        }
+
+        // Shell variable: `$name`, `${…}`, `$1`, `$?` `$@` `$#` `$*` `$$` `$!`.
+        if spec.dollar_vars && c == '$' && i + 1 < n {
+            let d = chars[i + 1];
+            let mut j = i + 1;
+            if d == '{' {
+                while j < n && chars[j] != '}' {
+                    j += 1;
+                }
+                j = (j + 1).min(n);
+            } else if d.is_alphanumeric() || d == '_' {
+                while j < n && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+            } else if "?@#*$!-".contains(d) {
+                j += 1;
+            }
+            if j > i + 1 {
+                push(&mut tokens, i, j, TokenKind::Variable);
+                i = j;
+                continue;
+            }
         }
 
         // Block comment — only up to its close on THIS line (or EOL).
@@ -79,6 +123,17 @@ pub fn tokenize(line: &str, spec: &LangSpec) -> Vec<Token> {
             }
             push(&mut tokens, i, j.min(n), TokenKind::String);
             i = j.min(n);
+            continue;
+        }
+
+        // Single-quoted string — literal, no escapes (shell, TOML).
+        if c == '\'' && spec.single_quote_string {
+            let mut j = i + 1;
+            while j < n && chars[j] != '\'' {
+                j += 1;
+            }
+            push(&mut tokens, i, (j + 1).min(n), TokenKind::String);
+            i = (j + 1).min(n);
             continue;
         }
 
@@ -177,6 +232,18 @@ fn push(tokens: &mut Vec<Token>, start: usize, end: usize, kind: TokenKind) {
     tokens.push(Token { start, end, kind });
 }
 
+/// Base spec — all flags off. `..DEFAULT` keeps the per-language specs short.
+const DEFAULT: LangSpec = LangSpec {
+    keywords: &[],
+    line_comment: "",
+    block_comment: None,
+    char_literal: false,
+    single_quote_string: false,
+    hash_directive: false,
+    dollar_vars: false,
+    bracket_headers: false,
+};
+
 pub static PYTHON: LangSpec = LangSpec {
     keywords: &[
         "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
@@ -185,9 +252,7 @@ pub static PYTHON: LangSpec = LangSpec {
         "yield", "match", "case", "None", "True", "False", "self", "cls",
     ],
     line_comment: "#",
-    block_comment: None,
-    char_literal: false,
-    hash_directive: false,
+    ..DEFAULT
 };
 
 pub static RUST: LangSpec = LangSpec {
@@ -201,7 +266,7 @@ pub static RUST: LangSpec = LangSpec {
     line_comment: "//",
     block_comment: Some(("/*", "*/")),
     char_literal: true,
-    hash_directive: false,
+    ..DEFAULT
 };
 
 pub static C: LangSpec = LangSpec {
@@ -216,6 +281,36 @@ pub static C: LangSpec = LangSpec {
     block_comment: Some(("/*", "*/")),
     char_literal: true,
     hash_directive: true,
+    ..DEFAULT
+};
+
+pub static SHELL: LangSpec = LangSpec {
+    keywords: &[
+        "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac",
+        "in", "function", "select", "return", "break", "continue", "local", "readonly", "declare",
+        "export", "unset", "shift", "exit", "trap", "set", "source", "alias", "echo", "printf",
+        "read", "cd", "true", "false",
+    ],
+    line_comment: "#",
+    single_quote_string: true,
+    dollar_vars: true,
+    ..DEFAULT
+};
+
+pub static TOML: LangSpec = LangSpec {
+    keywords: &["true", "false"],
+    line_comment: "#",
+    single_quote_string: true,
+    bracket_headers: true,
+    ..DEFAULT
+};
+
+pub static JSON: LangSpec = LangSpec {
+    // strict JSON has none of these, but JSONC / JSON5 files are common
+    keywords: &["true", "false", "null"],
+    line_comment: "//",
+    block_comment: Some(("/*", "*/")),
+    ..DEFAULT
 };
 
 #[cfg(test)]
@@ -278,5 +373,36 @@ mod tests {
         let t = kinds("y = 3.14e-2 + 0xFF;", &RUST);
         assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Number));
         assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Operator));
+    }
+
+    #[test]
+    fn shell_vars_keywords_and_quotes() {
+        let t = kinds("if [ \"$HOME\" = '/root' ]; then echo ${x:-1}", &SHELL);
+        assert!(t.contains(&(0, 2, TokenKind::Keyword))); // if
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Variable)); // $HOME
+        assert!(t.iter().any(|&(s, _, k)| k == TokenKind::String && s > 12)); // '/root'
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Keyword)); // then
+    }
+
+    #[test]
+    fn toml_header_string_and_bool() {
+        let t = kinds("[package]", &TOML);
+        assert_eq!(t, vec![(0, 9, TokenKind::Keyword)]);
+        let t = kinds("name = \"vulide\"  # note", &TOML);
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::String));
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Comment));
+        assert!(
+            kinds("debug = true", &TOML)
+                .iter()
+                .any(|&(_, _, k)| k == TokenKind::Keyword)
+        );
+    }
+
+    #[test]
+    fn json_strings_and_literals() {
+        let t = kinds("  \"key\": [true, null, 42],", &JSON);
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::String));
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Keyword)); // true / null
+        assert!(t.iter().any(|&(_, _, k)| k == TokenKind::Number));
     }
 }

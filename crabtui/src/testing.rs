@@ -1146,8 +1146,8 @@ mod tests {
 
     #[test]
     fn unknown_extension_renders_plain() {
-        let path = std::env::temp_dir().join(format!("vulide_sh_{}.sh", std::process::id()));
-        std::fs::write(&path, "if true; then echo hi; fi\n").unwrap();
+        let path = std::env::temp_dir().join(format!("vulide_x_{}.ps1", std::process::id()));
+        std::fs::write(&path, "if true { echo hi }\n").unwrap();
         let mut h = Harness::new(80, 10);
         h.app.open_path(path.clone()).unwrap();
         h.draw();
@@ -1155,6 +1155,65 @@ mod tests {
         // `if` gets no keyword colour — falls back to plain fg
         assert_eq!(h.cell(4, 0).fg, h.app.theme.fg);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ctrl_q_quits_immediately_when_nothing_is_unsaved() {
+        let mut h = Harness::with_text("G\"hi\"", 60, 10); // from_str => not dirty
+        h.ctrl('q');
+        assert!(h.app.should_quit());
+        assert!(!h.app.overlay.is_open());
+    }
+
+    #[test]
+    fn ctrl_q_on_unsaved_asks_first() {
+        let mut h = Harness::new(60, 10);
+        h.type_str("G\"hi\""); // now dirty
+        h.ctrl('q');
+        assert!(!h.app.should_quit(), "held back by the guard");
+        assert!(matches!(
+            h.app.overlay,
+            crate::ui::overlay::Overlay::Confirm(_)
+        ));
+        assert!(h.contains("unsaved changes"));
+
+        h.key(KeyCode::Esc); // cancel
+        assert!(!h.app.should_quit());
+        assert!(!h.app.overlay.is_open());
+
+        h.ctrl('q');
+        h.key(KeyCode::Char('n')); // discard & quit
+        assert!(h.app.should_quit());
+    }
+
+    #[test]
+    fn quit_guard_y_saves_a_titled_buffer_then_quits() {
+        let path = std::env::temp_dir().join(format!("vulide_qg_{}.vul", std::process::id()));
+        std::fs::write(&path, "G\"a\"\n").unwrap();
+        let mut h = Harness::new(60, 10);
+        h.app.open_path(path.clone()).unwrap();
+        h.type_str("G\"b\"\n");
+        assert!(h.app.buf().is_dirty());
+
+        h.ctrl('q');
+        h.key(KeyCode::Char('y'));
+        assert!(h.app.should_quit());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("G\"b\""));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn quit_guard_y_on_untitled_opens_save_as_instead_of_quitting() {
+        let mut h = Harness::new(60, 10);
+        h.type_str("G\"x\""); // dirty + untitled
+        h.ctrl('q');
+        h.key(KeyCode::Char('y'));
+        assert!(!h.app.should_quit(), "can't quit without naming the file");
+        assert!(matches!(
+            h.app.overlay,
+            crate::ui::overlay::Overlay::Prompt(_)
+        ));
+        assert!(h.contains("Save As"));
     }
 
     #[test]

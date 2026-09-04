@@ -24,6 +24,9 @@ pub enum Overlay {
     Palette(Box<Palette>),
     ThemePicker(Box<ThemePicker>),
     Help(Box<Help>),
+    /// A yes / no / cancel question — currently only the unsaved-changes guard
+    /// on quit.
+    Confirm(Box<Confirm>),
 }
 
 impl Overlay {
@@ -142,6 +145,85 @@ pub fn expand_tilde(path: &str) -> String {
         return format!("{home}{}", &path[1..]);
     }
     path.to_string()
+}
+
+// ---- confirm (yes / no / cancel) ----
+
+/// What a resolved `Confirm` should make the app do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Quitting with unsaved buffers: Yes = save then quit, No = discard & quit.
+    QuitUnsaved,
+}
+
+pub enum ConfirmOutcome {
+    Stay,
+    Cancel,
+    Yes,
+    No,
+}
+
+pub struct Confirm {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
+impl Confirm {
+    pub fn quit_unsaved(message: String) -> Self {
+        Self {
+            message,
+            action: ConfirmAction::QuitUnsaved,
+        }
+    }
+
+    pub fn handle_key(&self, key: KeyEvent) -> ConfirmOutcome {
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => ConfirmOutcome::Yes,
+            KeyCode::Char('n' | 'N') => ConfirmOutcome::No,
+            KeyCode::Esc => ConfirmOutcome::Cancel,
+            _ => ConfirmOutcome::Stay,
+        }
+    }
+
+    fn hint(&self) -> &'static str {
+        match self.action {
+            ConfirmAction::QuitUnsaved => "[Y] save & quit    [n] discard & quit    [Esc] cancel",
+        }
+    }
+}
+
+pub fn render_confirm(f: &mut Frame, c: &Confirm, theme: &Theme, area: Rect) -> Rect {
+    let hint = c.hint();
+    let width = (c.message.chars().count().max(hint.chars().count()) as u16 + 6).min(area.width);
+    // 2 border + 2 padding + 3 content rows.
+    let rect = centered_rect(width, 7, area);
+    f.render_widget(Clear, rect);
+
+    let panel = Style::default().fg(theme.fg).bg(theme.statusbar_bg);
+    let accent = Style::default()
+        .fg(theme.accent)
+        .bg(theme.statusbar_bg)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default()
+        .fg(theme.statusbar_fg)
+        .bg(theme.statusbar_bg);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .padding(Padding::symmetric(2, 1))
+        .border_style(Style::default().fg(theme.accent).bg(theme.statusbar_bg))
+        .title(Span::styled(" Quit ", accent))
+        .style(panel);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(c.message.clone(), panel)),
+            Line::default(),
+            Line::from(Span::styled(hint, muted)),
+        ]),
+        inner,
+    );
+    rect
 }
 
 pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

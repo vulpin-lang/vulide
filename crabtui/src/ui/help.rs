@@ -87,7 +87,10 @@ pub const CARD: &[(&str, &[(&str, &str)])] = &[
             ),
             ("F1  /  Ctrl+H", "this help"),
             ("Esc", "dismiss popup / overlay / leave the output panel"),
-            ("Ctrl+Q / Ctrl+C", "quit"),
+            (
+                "Ctrl+Q / Ctrl+C",
+                "quit (asks first if a buffer is unsaved)",
+            ),
         ],
     ),
     (

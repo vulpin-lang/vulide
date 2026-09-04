@@ -652,7 +652,10 @@ mod tests {
             ("py", Language::Python),
             ("rs", Language::Rust),
             ("c", Language::C),
-            ("sh", Language::Plain),
+            ("sh", Language::Shell),
+            ("toml", Language::Toml),
+            ("json", Language::Json),
+            ("md", Language::Markdown),
             ("ps1", Language::Plain),
         ] {
             let p = dir.join(format!("vulide_lang_{}_{}.{ext}", std::process::id(), ext));

@@ -25,7 +25,10 @@ use crate::search::{Field, Search, SearchAction};
 use crate::theme::Theme;
 use crate::ui;
 use crate::ui::help::HelpOutcome;
-use crate::ui::overlay::{Overlay, PathPrompt, PromptKind, PromptOutcome, expand_tilde};
+use crate::ui::overlay::{
+    Confirm, ConfirmAction, ConfirmOutcome, Overlay, PathPrompt, PromptKind, PromptOutcome,
+    expand_tilde,
+};
 use crate::ui::palette::{Cmd, Entry, Palette, PaletteOutcome};
 use crate::ui::tabs::TabHit;
 use crate::ui::theme_picker::{ThemePicker, ThemePickerOutcome};
@@ -420,6 +423,51 @@ impl App {
         self.set_status(msg);
     }
 
+    // ---- quit ----
+
+    /// Ctrl+Q / Ctrl+C / palette Quit route here. Quits straight away unless a
+    /// buffer has unsaved changes, in which case it asks first.
+    fn request_quit(&mut self) {
+        let dirty = self.buffers.iter().filter(|b| b.is_dirty()).count();
+        if dirty == 0 {
+            self.should_quit = true;
+            return;
+        }
+        let message = if dirty == 1 {
+            "1 file has unsaved changes.".to_string()
+        } else {
+            format!("{dirty} files have unsaved changes.")
+        };
+        self.overlay = Overlay::Confirm(Box::new(Confirm::quit_unsaved(message)));
+    }
+
+    /// The quit-guard's "Y" (save then quit). Saves every buffer that already
+    /// has a path; if an untitled buffer is still dirty it switches there and
+    /// opens Save As instead of quitting.
+    fn confirm_yes_quit(&mut self) {
+        let mut untitled: Option<usize> = None;
+        for i in 0..self.buffers.len() {
+            if !self.buffers[i].is_dirty() {
+                continue;
+            }
+            if self.buffers[i].path().is_some() {
+                if let Err(e) = self.buffers[i].save() {
+                    self.set_status(format!("save failed: {e} — not quitting"));
+                    return;
+                }
+            } else if untitled.is_none() {
+                untitled = Some(i);
+            }
+        }
+        if let Some(i) = untitled {
+            self.active = i;
+            self.overlay = Overlay::Prompt(Box::new(PathPrompt::save(&default_save_seed())));
+            self.set_status("name this file, then quit again");
+            return;
+        }
+        self.should_quit = true;
+    }
+
     // ---- command palette ----
 
     fn open_palette(&mut self) {
@@ -473,7 +521,7 @@ impl App {
 
     fn run_command(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Quit => self.should_quit = true,
+            Cmd::Quit => self.request_quit(),
             Cmd::Save => self.save_active(),
             Cmd::SaveAs => {
                 self.overlay = Overlay::Prompt(Box::new(PathPrompt::save(&default_save_seed())));
@@ -678,7 +726,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Char('c') => {
-                    self.should_quit = true;
+                    self.request_quit();
                     return;
                 }
                 KeyCode::Char('p') => return self.open_palette(),
@@ -766,7 +814,7 @@ impl App {
     fn handle_files_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Char('c') => self.should_quit = true,
+                KeyCode::Char('q') | KeyCode::Char('c') => self.request_quit(),
                 KeyCode::Char('p') => self.open_palette(),
                 _ => {}
             }
@@ -1387,6 +1435,26 @@ impl App {
                 }
                 true
             }
+            Overlay::Confirm(c) => {
+                let action = c.action;
+                match c.handle_key(key) {
+                    ConfirmOutcome::Stay => {}
+                    ConfirmOutcome::Cancel => self.overlay = Overlay::None,
+                    ConfirmOutcome::Yes => {
+                        self.overlay = Overlay::None;
+                        match action {
+                            ConfirmAction::QuitUnsaved => self.confirm_yes_quit(),
+                        }
+                    }
+                    ConfirmOutcome::No => {
+                        self.overlay = Overlay::None;
+                        match action {
+                            ConfirmAction::QuitUnsaved => self.should_quit = true,
+                        }
+                    }
+                }
+                true
+            }
             Overlay::ThemePicker(picker) => {
                 match picker.handle_key(key) {
                     ThemePickerOutcome::Preview(i) => self.preview_theme(i),
@@ -1491,7 +1559,11 @@ impl App {
         }
         self.handle_key_inner(key);
         // The `$word` context under the cursor may have changed — re-scan.
-        self.completion = if self.config.show_autocomplete {
+        // Autocomplete is Vulpin-specific ($vars, string methods, command
+        // hints), so it stays off for Python / Rust / C / … buffers.
+        self.completion = if self.config.show_autocomplete
+            && self.buf().language() == crate::syntax::Language::Vulpin
+        {
             Completion::detect(self.buf())
         } else {
             None
@@ -1506,14 +1578,14 @@ impl App {
         if ctrl {
             match key.code {
                 KeyCode::Char('q') => {
-                    self.should_quit = true;
+                    self.request_quit();
                     return;
                 }
                 KeyCode::Char('c') => {
                     if self.run.as_ref().is_some_and(RunConsole::is_running) {
                         self.stop_run();
                     } else {
-                        self.should_quit = true;
+                        self.request_quit();
                     }
                     return;
                 }
@@ -1595,10 +1667,11 @@ impl App {
         // ---- app-level shortcuts (must not hold a &mut buffer) ----
         if ctrl {
             match key.code {
-                // Ctrl+C and Ctrl+Q both quit for now. A dirty-buffer guard and a
-                // modal `:` command line (BatScript wants Vim-like) land in Phase 1.5.
+                // Ctrl+Q / Ctrl+C: quits, but asks first if a buffer is unsaved.
+                // A modal `:` command line (BatScript wants Vim-like) is still
+                // Phase 1.5.
                 KeyCode::Char('q') | KeyCode::Char('c') => {
-                    self.should_quit = true;
+                    self.request_quit();
                     return;
                 }
                 KeyCode::Char('p') => {
