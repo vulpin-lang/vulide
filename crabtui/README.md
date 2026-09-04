@@ -63,6 +63,8 @@ Requires a recent stable Rust (edition 2024). The Vulpin interpreter is found vi
 - **File tree** (`F2`) — a lazily-expanded directory view in the left column,
   rooted at the open file's folder (or the working dir). `Enter` / click opens a
   file in a tab or toggles a folder. Stacks above the outline when both are on.
+  `Ctrl+O`-ing a directory (or passing one on the command line) roots the tree
+  there instead of trying to open it as a file.
 - **Structure outline** (`F7`) — functions, loops, conditionals, switch/try
   blocks, labels, jumps, returns, indented by nesting; tolerant of half-typed
   code. `Enter` or click jumps the editor there.

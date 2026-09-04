@@ -324,6 +324,14 @@ impl App {
     }
 
     fn open_file(&mut self, path: PathBuf) -> io::Result<()> {
+        // A directory isn't a buffer — root the file tree there instead of
+        // trying (and failing) to read it as text. Covers Ctrl+O, the CLI
+        // file argument, and anything else that funnels through here.
+        if path.is_dir() {
+            self.open_dir(path);
+            return Ok(());
+        }
+
         let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
         if let Some(i) = self
@@ -353,6 +361,21 @@ impl App {
         self.config.push_recent(&canonical);
         self.save_config();
         Ok(())
+    }
+
+    /// Point the file-tree sidebar at `path` and show it — what "opening" a
+    /// directory means, as opposed to opening a file into a tab.
+    fn open_dir(&mut self, path: PathBuf) {
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        self.file_tree = Some(crate::filetree::FileTree::new(&canonical));
+        self.files_selected = 0;
+        self.files_scroll = 0;
+        self.files_revealed = None;
+        self.show_files = true;
+        self.focus = Focus::Files;
+        self.config.show_files = true;
+        self.save_config();
+        self.set_status(format!("file tree: {}", canonical.display()));
     }
 
     fn new_tab(&mut self) {

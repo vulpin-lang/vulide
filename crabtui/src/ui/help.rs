@@ -19,7 +19,10 @@ pub const CARD: &[(&str, &[(&str, &str)])] = &[
         "Files & tabs",
         &[
             ("Ctrl+S", "save (Save As if untitled)"),
-            ("Ctrl+O", "open a file"),
+            (
+                "Ctrl+O",
+                "open a file (a directory shows it in the file tree)",
+            ),
             ("Ctrl+N", "new tab"),
             ("Ctrl+W", "close tab (refuses if unsaved)"),
             ("Ctrl+PgUp / PgDn", "previous / next tab"),

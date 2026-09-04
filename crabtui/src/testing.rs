@@ -544,6 +544,32 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_o_on_a_directory_shows_the_file_tree_instead_of_erroring() {
+        let dir = std::env::temp_dir().join(format!("vulide_opendir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.vul"), "Q\n").unwrap();
+
+        let mut h = Harness::new(90, 20);
+        h.ctrl('o');
+        for _ in 0..300 {
+            h.key(KeyCode::Backspace);
+        }
+        h.type_str(dir.to_str().unwrap());
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open(), "prompt closed, not an error");
+        assert_eq!(
+            h.app.buffers.len(),
+            1,
+            "no tab was opened for the directory"
+        );
+        assert!(h.app.show_files);
+        assert_eq!(h.app.focus, crate::app::Focus::Files);
+        assert!(h.contains("a.vul"), "tree shows the directory's contents");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn word_wrap_flows_a_long_line_onto_several_rows() {
         let long = "G \"".to_string() + &"ab ".repeat(20) + "\"";
         let mut h = Harness::with_text(&long, 30, 10);
