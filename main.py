@@ -1,5 +1,5 @@
 # 2026 COPYRIGHT BY VULPIN LABS ALL RIGHT REVERSED.
-
+# Old GUI version on V1.0 (Vulpin 0.8 edition)
 import sys
 import os
 import json
