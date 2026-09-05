@@ -435,6 +435,109 @@ impl Buffer {
         self.history.set_break();
     }
 
+    /// `Ctrl+Backspace`: delete the word behind the cursor, same as selecting
+    /// it with `Ctrl+Shift+Left` then pressing Backspace. An existing
+    /// selection is just deleted as-is — the word motion never runs, so it
+    /// can't silently grow a selection the user already made.
+    pub fn delete_word_backward(&mut self) {
+        if self.selection().is_none() {
+            self.move_word_left(true);
+        }
+        self.delete_backward();
+    }
+
+    /// `Ctrl+Delete`: delete the word ahead of the cursor. Same
+    /// existing-selection rule as `delete_word_backward`.
+    pub fn delete_word_forward(&mut self) {
+        if self.selection().is_none() {
+            self.move_word_right(true);
+        }
+        self.delete_forward();
+    }
+
+    /// `Ctrl+D`: insert a copy of the cursor's line directly below it, cursor
+    /// moving down onto the copy at the same column. A line operation, not a
+    /// text operation — any active selection is cleared, not duplicated.
+    pub fn duplicate_line(&mut self) {
+        self.goal_col = None;
+        let line = self.cursor.line;
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        let block = self.rope.slice(start..end).to_string();
+        let insert = if block.ends_with('\n') {
+            block
+        } else {
+            format!("\n{block}")
+        };
+        self.history.record(&self.rope, self.cursor, false);
+        self.rope.insert(end, &insert);
+        self.cursor = Position {
+            line: line + 1,
+            col: self.cursor.col,
+        };
+        self.anchor = None;
+        self.history.set_break();
+    }
+
+    /// The `[start, end)` char range of a line's own content — the same as
+    /// `line_char_len` (a newline / `\r\n` excluded), so swapping two lines'
+    /// content never has to reason about which one owns the line break
+    /// between (or after) them.
+    fn line_content_range(&self, line: usize) -> (usize, usize) {
+        let start = self.rope.line_to_char(line);
+        (start, start + mv::line_char_len(&self.rope, line))
+    }
+
+    /// `Alt+Up` / `Alt+Down`: swap the cursor's line with its neighbor,
+    /// cursor following its own (unchanged) text to the new line. A no-op at
+    /// the top/bottom edge of the buffer.
+    fn move_line(&mut self, dir: isize) {
+        self.goal_col = None;
+        let line = self.cursor.line;
+        let last = mv::last_line(&self.rope);
+        let target = if dir < 0 {
+            if line == 0 {
+                return;
+            }
+            line - 1
+        } else {
+            if line >= last {
+                return;
+            }
+            line + 1
+        };
+        let (a, b) = (line.min(target), line.max(target));
+        let (a_start, a_end) = self.line_content_range(a);
+        let (b_start, b_end) = self.line_content_range(b);
+        let text_a = self.rope.slice(a_start..a_end).to_string();
+        let text_b = self.rope.slice(b_start..b_end).to_string();
+        self.history.record(&self.rope, self.cursor, false);
+        // The `b` range sits later in the rope — rewrite it first so `a`'s
+        // indices (both before it) stay valid no matter how the lengths differ.
+        self.rope.remove(b_start..b_end);
+        self.rope.insert(b_start, &text_a);
+        self.rope.remove(a_start..a_end);
+        self.rope.insert(a_start, &text_b);
+        self.cursor = Position {
+            line: target,
+            col: self.cursor.col,
+        };
+        self.anchor = None;
+        self.history.set_break();
+    }
+
+    pub fn move_line_up(&mut self) {
+        self.move_line(-1);
+    }
+
+    pub fn move_line_down(&mut self) {
+        self.move_line(1);
+    }
+
     /// Indent (or dedent) every line the cursor/selection touches.
     pub fn indent(&mut self, dedent: bool) {
         let (start_line, end_line) = match self.selection() {
@@ -815,5 +918,91 @@ mod tests {
         assert_eq!(b.rope().to_string(), "    a\n    b\n    c");
         b.indent(true);
         assert_eq!(b.rope().to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn delete_word_backward_eats_the_word_behind_the_cursor() {
+        let mut b = Buffer::from_str("foo bar baz");
+        b.set_cursor(Position { line: 0, col: 11 }, false); // end of "baz"
+        b.delete_word_backward();
+        assert_eq!(b.rope().to_string(), "foo bar ");
+        b.delete_word_backward();
+        assert_eq!(b.rope().to_string(), "foo ");
+    }
+
+    #[test]
+    fn delete_word_forward_eats_the_word_ahead_of_the_cursor() {
+        let mut b = Buffer::from_str("foo bar baz");
+        b.set_cursor(Position { line: 0, col: 0 }, false);
+        b.delete_word_forward();
+        assert_eq!(b.rope().to_string(), "bar baz");
+    }
+
+    #[test]
+    fn delete_word_backward_with_an_existing_selection_just_deletes_it() {
+        let mut b = Buffer::from_str("foo bar baz");
+        b.set_cursor(Position { line: 0, col: 4 }, false);
+        b.set_cursor(Position { line: 0, col: 7 }, true); // selects "bar"
+        b.delete_word_backward();
+        assert_eq!(b.rope().to_string(), "foo  baz");
+    }
+
+    #[test]
+    fn duplicate_line_copies_a_middle_line_and_moves_the_cursor_down() {
+        let mut b = Buffer::from_str("one\ntwo\nthree");
+        b.set_cursor(Position { line: 1, col: 2 }, false);
+        b.duplicate_line();
+        assert_eq!(b.rope().to_string(), "one\ntwo\ntwo\nthree");
+        assert_eq!(b.cursor(), Position { line: 2, col: 2 });
+    }
+
+    #[test]
+    fn duplicate_line_handles_the_last_line_with_no_trailing_newline() {
+        let mut b = Buffer::from_str("only");
+        b.set_cursor(Position { line: 0, col: 2 }, false);
+        b.duplicate_line();
+        assert_eq!(b.rope().to_string(), "only\nonly");
+        assert_eq!(b.cursor(), Position { line: 1, col: 2 });
+    }
+
+    #[test]
+    fn move_line_up_and_down_swap_adjacent_lines() {
+        let mut b = Buffer::from_str("one\ntwo\nthree");
+        b.set_cursor(Position { line: 1, col: 1 }, false); // "two"
+        b.move_line_up();
+        assert_eq!(b.rope().to_string(), "two\none\nthree");
+        assert_eq!(
+            b.cursor(),
+            Position { line: 0, col: 1 },
+            "follows its text up"
+        );
+
+        b.move_line_down();
+        assert_eq!(b.rope().to_string(), "one\ntwo\nthree");
+        assert_eq!(
+            b.cursor(),
+            Position { line: 1, col: 1 },
+            "follows its text back down"
+        );
+    }
+
+    #[test]
+    fn move_line_is_a_no_op_at_the_buffer_edges() {
+        let mut b = Buffer::from_str("one\ntwo");
+        b.set_cursor(Position { line: 0, col: 0 }, false);
+        b.move_line_up(); // already at the top
+        assert_eq!(b.rope().to_string(), "one\ntwo");
+
+        b.set_cursor(Position { line: 1, col: 0 }, false);
+        b.move_line_down(); // already at the bottom
+        assert_eq!(b.rope().to_string(), "one\ntwo");
+    }
+
+    #[test]
+    fn move_line_swaps_with_the_last_line_lacking_a_trailing_newline() {
+        let mut b = Buffer::from_str("one\ntwo\nthree"); // "three" has no \n
+        b.set_cursor(Position { line: 2, col: 0 }, false);
+        b.move_line_up();
+        assert_eq!(b.rope().to_string(), "one\nthree\ntwo");
     }
 }

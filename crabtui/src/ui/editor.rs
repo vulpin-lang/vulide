@@ -66,8 +66,11 @@ pub fn render(
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
     let total = buf.line_count().max(1);
+    // +1 beyond the digits-and-a-space: a dedicated column for the
+    // hex-color swatch (`colorswatch::line_color`), always reserved so the
+    // swatch never depends on having spare line-number padding to borrow.
     let gutter_w = if show_numbers {
-        ((total.to_string().len() as u16) + 1).max(GUTTER_MIN)
+        ((total.to_string().len() as u16) + 1).max(GUTTER_MIN) + 1
     } else {
         0
     };
@@ -130,10 +133,27 @@ pub fn render(
                 } else {
                     theme.line_fg
                 });
-                let label = if vi == 0 {
-                    format!("{:>w$} ", ln + 1, w = (gutter_w - 1) as usize)
+                // Swatch column: only on a line's first visual row (matches
+                // where the line number itself shows) — a wrapped
+                // continuation row leaves it blank, same as the number.
+                let swatch = if vi == 0 {
+                    crate::colorswatch::line_color(&text)
                 } else {
-                    " ".repeat(gutter_w as usize)
+                    None
+                };
+                let (glyph, glyph_fg) = match swatch {
+                    Some(c) => ("●", c),
+                    None => (" ", gutter_style.fg.unwrap_or(theme.line_fg)),
+                };
+                spans.push(Span::styled(
+                    glyph,
+                    Style::default().bg(theme.bg).fg(glyph_fg),
+                ));
+                let number_w = (gutter_w - 2) as usize;
+                let label = if vi == 0 {
+                    format!("{:>number_w$} ", ln + 1)
+                } else {
+                    " ".repeat(number_w + 1)
                 };
                 spans.push(Span::styled(label, gutter_style));
             }

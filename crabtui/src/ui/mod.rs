@@ -7,10 +7,14 @@
 pub mod algo;
 pub mod editor;
 pub mod filetree;
+pub mod goto_line;
 pub mod help;
 pub mod overlay;
 pub mod palette;
 pub mod panel;
+pub mod project_search;
+pub mod projects;
+pub mod snippet_picker;
 pub mod splitter;
 pub mod status;
 pub mod tabs;
@@ -244,13 +248,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.panel_close_rect = None;
     }
 
-    if let (Some(sa), Some(s)) = (search_area, &app.search) {
+    if let Some(sa) = search_area {
         let cur = if app.search_matches.is_empty() {
             0
         } else {
             app.search_idx + 1
         };
-        crate::search::render(f, s, &app.theme, (cur, app.search_matches.len()), sa);
+        let total = app.search_matches.len();
+        if let Some(s) = &mut app.search {
+            crate::search::render(f, s, &app.theme, (cur, total), sa);
+        }
     }
 
     // Record the run/stop button's hit rect (leftmost cells of the status bar).
@@ -276,12 +283,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Overlays draw last, over everything, and own the cursor while open. Record
     // the outer rect so a click outside it can dismiss the overlay.
-    app.overlay_rect = match &app.overlay {
+    let project_root = app.project_root();
+    app.overlay_rect = match &mut app.overlay {
         Overlay::Prompt(prompt) => Some(overlay::render_prompt(f, prompt, &app.theme, area)),
         Overlay::Palette(palette) => Some(palette::render(f, palette, &app.theme, area)),
         Overlay::ThemePicker(picker) => Some(theme_picker::render(f, picker, &app.theme, area)),
         Overlay::Help(h) => Some(help::render(f, h, &app.theme, area)),
         Overlay::Confirm(c) => Some(overlay::render_confirm(f, c, &app.theme, area)),
+        Overlay::SnippetPicker(p) => Some(snippet_picker::render(f, p, &app.theme, area)),
+        Overlay::GotoLine(g) => Some(goto_line::render(f, g, &app.theme, area)),
+        Overlay::ProjectSearch(p) => Some(project_search::render(
+            f,
+            p,
+            &app.theme,
+            &project_root,
+            area,
+        )),
+        Overlay::Projects(p) => Some(projects::render(f, p, &app.theme, area)),
+        Overlay::DeleteProject(d) => Some(projects::render_delete(f, d, &app.theme, area)),
         Overlay::None => None,
     };
 }

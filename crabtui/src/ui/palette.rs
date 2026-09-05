@@ -42,11 +42,15 @@ pub enum Cmd {
     ToggleMouse,
     ReloadConfig,
     OpenRecent(PathBuf),
+    InsertSnippet(&'static str),
     RunFile,
     StopRun,
     CloseOutput,
     Find,
     Replace,
+    FindInFiles,
+    GotoLine,
+    Projects,
     Help,
 }
 
@@ -140,6 +144,39 @@ impl Palette {
             _ => PaletteOutcome::Stay,
         }
     }
+
+    /// Row-hit test against the list, given the box `render` last drew into.
+    /// One border row plus the `> query` line sit above the list.
+    fn row_at(&self, outer: Rect, row: u16) -> Option<usize> {
+        let body_top = outer.y + 2;
+        if row < body_top {
+            return None;
+        }
+        let top = self.selected.saturating_sub(MAX_ROWS - 1);
+        let idx = top + (row - body_top) as usize;
+        (idx < self.filtered.len()).then_some(idx)
+    }
+
+    /// A left click at `row`: select and immediately run that entry, same as
+    /// pressing Enter on it.
+    pub fn click(&mut self, outer: Rect, row: u16) -> PaletteOutcome {
+        match self.row_at(outer, row) {
+            Some(idx) => {
+                self.selected = idx;
+                PaletteOutcome::Run(self.entries[self.filtered[idx]].cmd.clone())
+            }
+            None => PaletteOutcome::Stay,
+        }
+    }
+
+    /// Mouse wheel: move the selection by one row.
+    pub fn scroll(&mut self, delta: isize) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let n = self.filtered.len() as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, n - 1) as usize;
+    }
 }
 
 /// Subsequence match with a light score (contiguous runs and word-starts win).
@@ -212,16 +249,24 @@ pub fn render(f: &mut Frame, p: &Palette, theme: &Theme, area: Rect) -> Rect {
             panel
         };
         let marker = if selected { "▸ " } else { "  " };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{}", p.entries[idx].label),
-            style,
-        )));
+        // Truncate rather than wrap: each entry is one row, which is what
+        // keeps click / scroll row-hit-testing lined up with `p.filtered`.
+        let budget = (inner.width as usize).saturating_sub(marker.chars().count());
+        let label = &p.entries[idx].label;
+        let text = if label.chars().count() > budget && budget > 1 {
+            let head: String = label.chars().take(budget - 1).collect();
+            format!("{head}…")
+        } else {
+            label.clone()
+        };
+        lines.push(Line::from(Span::styled(format!("{marker}{text}"), style)));
     }
     if p.filtered.is_empty() {
         lines.push(Line::from(Span::styled("  (no matches)", panel)));
     }
 
     f.render_widget(Paragraph::new(lines).style(panel), inner);
+    super::sidebar_scrollbar(f, theme, rect, p.filtered.len(), top);
     f.set_cursor_position(TermPos::new(
         inner.x + 2 + query.chars().count() as u16,
         inner.y,

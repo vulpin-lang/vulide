@@ -24,12 +24,16 @@ use crate::run::{self, RunConsole};
 use crate::search::{Field, Search, SearchAction};
 use crate::theme::Theme;
 use crate::ui;
+use crate::ui::goto_line::{GotoLine, GotoOutcome};
 use crate::ui::help::HelpOutcome;
 use crate::ui::overlay::{
     Confirm, ConfirmAction, ConfirmOutcome, Overlay, PathPrompt, PromptKind, PromptOutcome,
     expand_tilde,
 };
 use crate::ui::palette::{Cmd, Entry, Palette, PaletteOutcome};
+use crate::ui::project_search::ProjectSearchAction;
+use crate::ui::projects::{DeleteConfirm, DeleteOutcome, ProjectsAction, ProjectsPicker};
+use crate::ui::snippet_picker::SnippetOutcome;
 use crate::ui::tabs::TabHit;
 use crate::ui::theme_picker::{ThemePicker, ThemePickerOutcome};
 
@@ -129,6 +133,15 @@ pub struct App {
     /// The terminal window/tab title last written, so we only emit the OSC
     /// escape when it actually changes.
     title_shown: String,
+    /// Opened once and kept alive for the app's lifetime. On X11, dropping an
+    /// `arboard::Clipboard` right after `set_text` races the background
+    /// thread that serves the paste request to other apps — arboard warns
+    /// about this straight to stderr, which (with the terminal in raw / the
+    /// alternate screen) corrupts the display instead of just logging.
+    /// `None` after a failed open (no display server) so we don't retry
+    /// every keystroke; `Err` == tried and failed, cached so `Ctrl+C`/`Ctrl+V`
+    /// give one clean status message instead of hammering `Clipboard::new()`.
+    clipboard: Option<Result<arboard::Clipboard, String>>,
 }
 
 impl App {
@@ -199,6 +212,7 @@ impl App {
             run_tx: None,
             should_quit: false,
             title_shown: String::new(),
+            clipboard: None,
         };
         app.apply_config();
         // The outline is rebuilt every draw, but the file tree is disk I/O and
@@ -247,6 +261,68 @@ impl App {
     pub fn open_theme_picker(&mut self) {
         let names = self.themes.iter().map(|t| t.name.clone()).collect();
         self.overlay = Overlay::ThemePicker(Box::new(ThemePicker::new(names, self.theme_idx)));
+    }
+
+    /// `F3` — snippets are Vulpin syntax, so this is a no-op (with a status
+    /// message) everywhere else.
+    fn open_snippet_picker(&mut self) {
+        if self.buf().language() != crate::syntax::Language::Vulpin {
+            self.set_status("snippets are Vulpin-only");
+            return;
+        }
+        self.overlay = Overlay::SnippetPicker(Box::default());
+    }
+
+    /// `Ctrl+G` — jump the cursor to a 1-based line number.
+    fn open_goto_line(&mut self) {
+        self.overlay = Overlay::GotoLine(Box::new(GotoLine::new(self.buf().line_count())));
+    }
+
+    fn goto_line(&mut self, n: usize) {
+        let line = n.saturating_sub(1);
+        self.buf_mut()
+            .set_cursor(crate::buffer::Position { line, col: 0 }, false);
+        self.set_status(format!("line {n}"));
+    }
+
+    /// `F4` — find in files, rooted at the open file tree (or the active
+    /// file's directory / cwd, same fallback as the file tree itself).
+    fn open_project_search(&mut self) {
+        self.overlay = Overlay::ProjectSearch(Box::default());
+        self.set_status("find in files: type to search · Enter opens · Esc closes");
+    }
+
+    /// The directory a project-wide operation (search, later: "Projects")
+    /// should root itself at — the open file tree if there is one, else
+    /// wherever `F2` would open it.
+    pub fn project_root(&self) -> PathBuf {
+        self.file_tree
+            .as_ref()
+            .map(|t| t.root.clone())
+            .unwrap_or_else(|| self.file_tree_root())
+    }
+
+    fn recompute_project_matches(&mut self) {
+        let root = self.project_root();
+        let Overlay::ProjectSearch(ps) = &mut self.overlay else {
+            return;
+        };
+        let r = crate::ui::project_search::run(&root, &ps.query(), ps.case_sensitive, ps.regex);
+        ps.selected = ps.selected.min(r.matches.len().saturating_sub(1));
+        ps.matches = r.matches;
+        ps.truncated = r.truncated;
+        ps.error = r.error;
+    }
+
+    /// Open `path` (reusing its tab if already open) and place the cursor at
+    /// a match's position — shared by `Enter` and a click in project search.
+    fn jump_to_match(&mut self, path: PathBuf, line: usize, col: usize) {
+        if let Err(e) = self.open_file(path) {
+            self.set_status(format!("open failed: {e}"));
+            return;
+        }
+        self.buf_mut()
+            .set_cursor(crate::buffer::Position { line, col }, false);
     }
 
     /// Swap the active theme without touching the config (live preview).
@@ -374,8 +450,104 @@ impl App {
         self.show_files = true;
         self.focus = Focus::Files;
         self.config.show_files = true;
+        self.config.push_recent_project(&canonical);
         self.save_config();
         self.set_status(format!("file tree: {}", canonical.display()));
+    }
+
+    /// `F8` Projects picker › "+ New Project…". An existing directory is just
+    /// opened (never scaffolded into — it might already hold real files); a
+    /// path that doesn't exist yet is created with a starter `main.vul`.
+    fn create_project(&mut self, path: &str) -> io::Result<()> {
+        let target = PathBuf::from(path);
+        if target.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "that path is a file, not a directory",
+            ));
+        }
+        if !target.exists() {
+            std::fs::create_dir_all(&target)?;
+            let name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
+            std::fs::write(
+                target.join("main.vul"),
+                format!("G\"Hello from {name}!\"\n"),
+            )?;
+        }
+        self.open_dir(target);
+        Ok(())
+    }
+
+    /// `F8` — the Projects picker: new / open / delete, seeded with the
+    /// directories most recently opened as a project.
+    fn open_projects(&mut self) {
+        // Stale entries (moved or deleted since last time) are just noise —
+        // and "opening" one would land on an empty, confusing file tree.
+        self.config.recent_projects.retain(|p| p.is_dir());
+        self.save_config();
+        let recent = self.config.recent_projects.clone();
+        self.overlay = Overlay::Projects(Box::new(ProjectsPicker::new(recent)));
+    }
+
+    /// A `Delete` in the Projects picker opens the typed-confirmation dialog
+    /// — the actual deletion only happens if `DeleteOutcome::Confirmed` comes
+    /// back from it (see `handle_overlay_key`).
+    fn request_delete_project(&mut self, path: PathBuf) {
+        self.overlay = Overlay::DeleteProject(Box::new(DeleteConfirm::new(path)));
+    }
+
+    /// Refuse to `remove_dir_all` a handful of catastrophic targets. Checked
+    /// against the canonicalized path so `..`/symlinks can't sneak past it.
+    fn refuse_delete(&self, canonical: &Path) -> Option<String> {
+        if let Ok(cwd) = std::env::current_dir()
+            && cwd.starts_with(canonical)
+        {
+            return Some(
+                "refusing to delete: that's the current working directory (or contains it)"
+                    .to_string(),
+            );
+        }
+        if let Some(home) = std::env::var_os("HOME")
+            && canonical == Path::new(&home)
+        {
+            return Some("refusing to delete your home directory".to_string());
+        }
+        if canonical.parent().is_none() {
+            return Some("refusing to delete a filesystem root".to_string());
+        }
+        if self.file_tree.as_ref().is_some_and(|t| t.root == canonical) {
+            return Some(
+                "open a different file or folder before deleting this project".to_string(),
+            );
+        }
+        None
+    }
+
+    /// The actual `rm -rf`, only ever reached after `DeleteConfirm` has
+    /// already required typing the folder's own name.
+    fn delete_project(&mut self, path: PathBuf) {
+        let Ok(canonical) = std::fs::canonicalize(&path) else {
+            // Already gone — just stop tracking it.
+            self.config.recent_projects.retain(|p| p != &path);
+            self.save_config();
+            self.set_status("that project no longer exists — removed from the list");
+            return;
+        };
+        if let Some(reason) = self.refuse_delete(&canonical) {
+            self.set_status(reason);
+            return;
+        }
+        match std::fs::remove_dir_all(&canonical) {
+            Ok(()) => {
+                self.config.recent_projects.retain(|p| p != &canonical);
+                self.save_config();
+                self.set_status(format!("deleted {}", canonical.display()));
+            }
+            Err(e) => self.set_status(format!("delete failed: {e}")),
+        }
     }
 
     fn new_tab(&mut self) {
@@ -500,6 +672,9 @@ impl App {
             Entry::new("Open File…", Cmd::OpenFile),
             Entry::new("Find…", Cmd::Find),
             Entry::new("Replace…", Cmd::Replace),
+            Entry::new("Find in Files… (F4)", Cmd::FindInFiles),
+            Entry::new("Go to Line… (Ctrl+G)", Cmd::GotoLine),
+            Entry::new("Projects — New / Open / Delete… (F8)", Cmd::Projects),
             Entry::new("New Tab", Cmd::NewTab),
             Entry::new("Close Tab", Cmd::CloseTab),
             Entry::new("Close Tab (discard changes)", Cmd::CloseTabDiscard),
@@ -538,6 +713,16 @@ impl App {
                 format!("Open Recent: {name}"),
                 Cmd::OpenRecent(p.clone()),
             ));
+        }
+        // Snippets are Vulpin syntax — only useful (and only offered) on a
+        // Vulpin buffer.
+        if self.buf().language() == crate::syntax::Language::Vulpin {
+            for s in crate::snippets::SNIPPETS {
+                entries.push(Entry::new(
+                    format!("Snippet: {}", s.name),
+                    Cmd::InsertSnippet(s.body),
+                ));
+            }
         }
         self.overlay = Overlay::Palette(Box::new(Palette::new(entries)));
     }
@@ -614,6 +799,10 @@ impl App {
                     self.set_status(format!("open failed: {e}"));
                 }
             }
+            Cmd::InsertSnippet(body) => {
+                self.buf_mut().insert_str(body);
+                self.clear_status();
+            }
             Cmd::RunFile => self.start_run(),
             Cmd::StopRun => self.stop_run(),
             Cmd::CloseOutput => self.close_output(),
@@ -624,6 +813,9 @@ impl App {
                     s.field = Field::Replace;
                 }
             }
+            Cmd::FindInFiles => self.open_project_search(),
+            Cmd::GotoLine => self.open_goto_line(),
+            Cmd::Projects => self.open_projects(),
             Cmd::Help => self.open_help(),
         }
     }
@@ -711,16 +903,49 @@ impl App {
         }
     }
 
+    /// `F6`: run the file if nothing has run yet (there's no output panel to
+    /// cycle to otherwise); once one exists, cycle focus through every
+    /// visible pane — editor, file tree, outline, output — same as `Tab`
+    /// already does from a sidebar, but this one works from the editor too,
+    /// where bare `Tab` means indent.
     fn toggle_output_focus(&mut self) {
         if self.run.is_none() {
             self.start_run();
             return;
         }
-        self.focus = if self.focus == Focus::Output {
-            Focus::Editor
+        self.cycle_focus(true);
+    }
+
+    /// Panes currently on screen, in a fixed cycling order. The editor is
+    /// always available; the others only when their sidebar/panel is shown.
+    fn focus_cycle(&self) -> Vec<Focus> {
+        let mut v = vec![Focus::Editor];
+        if self.show_files {
+            v.push(Focus::Files);
+        }
+        if self.show_algo {
+            v.push(Focus::Algo);
+        }
+        if self.run.is_some() {
+            v.push(Focus::Output);
+        }
+        v
+    }
+
+    /// Tab / Shift+Tab, from any pane but the editor (where Tab means indent):
+    /// move focus to the next / previous visible pane.
+    fn cycle_focus(&mut self, forward: bool) {
+        let targets = self.focus_cycle();
+        if targets.len() <= 1 {
+            return;
+        }
+        let i = targets.iter().position(|&f| f == self.focus).unwrap_or(0);
+        let next = if forward {
+            (i + 1) % targets.len()
         } else {
-            Focus::Output
+            (i + targets.len() - 1) % targets.len()
         };
+        self.focus = targets[next];
     }
 
     // ---- structure outline ----
@@ -748,8 +973,12 @@ impl App {
     fn handle_algo_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Char('c') => {
+                KeyCode::Char('q') => {
                     self.request_quit();
+                    return;
+                }
+                KeyCode::Char('w') => {
+                    self.close_tab(false);
                     return;
                 }
                 KeyCode::Char('p') => return self.open_palette(),
@@ -770,6 +999,8 @@ impl App {
             KeyCode::Home => self.algo_selected = 0,
             KeyCode::End => self.algo_selected = n.saturating_sub(1),
             KeyCode::Enter => self.jump_to_selected_outline_item(),
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::BackTab => self.cycle_focus(false),
             _ => {}
         }
     }
@@ -837,7 +1068,8 @@ impl App {
     fn handle_files_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Char('c') => self.request_quit(),
+                KeyCode::Char('q') => self.request_quit(),
+                KeyCode::Char('w') => self.close_tab(false),
                 KeyCode::Char('p') => self.open_palette(),
                 _ => {}
             }
@@ -850,6 +1082,14 @@ impl App {
             }
             KeyCode::Enter => {
                 self.activate_selected_file();
+                return;
+            }
+            KeyCode::Tab => {
+                self.cycle_focus(true);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.cycle_focus(false);
                 return;
             }
             _ => {}
@@ -950,6 +1190,56 @@ impl App {
         self.overlay = Overlay::Help(Box::default());
     }
 
+    // ---- clipboard ----
+
+    /// The shared clipboard handle, opened once and kept alive (see the
+    /// field doc on `App::clipboard` for why: a short-lived one corrupts the
+    /// display via a stderr warning while the terminal is in raw mode).
+    /// Cheap to call repeatedly — only the first call after a failure retries
+    /// `Clipboard::new()`.
+    fn clipboard(&mut self) -> Result<&mut arboard::Clipboard, String> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new().map_err(|e| e.to_string()));
+        }
+        match self.clipboard.as_mut().unwrap() {
+            Ok(cb) => Ok(cb),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// `Ctrl+C` in the editor: copy the selection to the system clipboard.
+    /// Needs a real X11/Wayland/Win32/macOS clipboard to talk to — over a
+    /// plain SSH session with no display this fails, which just shows up as
+    /// a status message rather than a crash.
+    fn copy_selection(&mut self) {
+        let Some(text) = self.buf().selection_text().filter(|s| !s.is_empty()) else {
+            self.set_status("nothing selected to copy");
+            return;
+        };
+        match self
+            .clipboard()
+            .and_then(|cb| cb.set_text(text).map_err(|e| e.to_string()))
+        {
+            Ok(()) => self.set_status("copied"),
+            Err(e) => self.set_status(format!("copy failed: {e}")),
+        }
+    }
+
+    /// `Ctrl+V`: insert the system clipboard's text at the cursor, replacing
+    /// the selection if there is one (same as typing would).
+    fn paste(&mut self) {
+        match self
+            .clipboard()
+            .and_then(|cb| cb.get_text().map_err(|e| e.to_string()))
+        {
+            Ok(text) => {
+                self.buf_mut().insert_str(&text);
+                self.clear_status();
+            }
+            Err(e) => self.set_status(format!("paste failed: {e}")),
+        }
+    }
+
     // ---- find / replace ----
 
     /// `Ctrl+F`: open the find/replace bar, seeded from the selection.
@@ -982,8 +1272,8 @@ impl App {
             self.search_matches.clear();
             return;
         };
-        let (q, cs) = (s.query(), s.case_sensitive);
-        self.search_matches = crate::search::find_all(self.buf(), &q, cs);
+        let (q, cs, rx) = (s.query(), s.case_sensitive, s.regex);
+        self.search_matches = crate::search::find_all(self.buf(), &q, cs, rx);
         if self.search_idx >= self.search_matches.len() {
             self.search_idx = 0;
         }
@@ -1151,17 +1441,86 @@ impl App {
                 }
                 return true;
             }
+            MouseEventKind::ScrollUp if self.overlay.is_open() => {
+                self.scroll_overlay(-1);
+                return true;
+            }
+            MouseEventKind::ScrollDown if self.overlay.is_open() => {
+                self.scroll_overlay(1);
+                return true;
+            }
             MouseEventKind::Down(MouseButton::Left) => {}
             _ => return false,
         }
 
         // ---- left click ----
 
-        // A click outside an open overlay dismisses it (like Esc).
+        // A click outside an open overlay dismisses it (like Esc); a click
+        // inside one selects/activates whatever row it landed on.
         if self.overlay.is_open() {
-            if !self.overlay_rect.is_some_and(|r| hit(r, col, row)) {
+            let Some(rect) = self.overlay_rect else {
                 self.dismiss_overlay();
+                return true;
+            };
+            if !hit(rect, col, row) {
+                self.dismiss_overlay();
+                return true;
             }
+            match &mut self.overlay {
+                Overlay::Palette(p) => match p.click(rect, row) {
+                    PaletteOutcome::Run(cmd) => {
+                        self.overlay = Overlay::None;
+                        self.run_command(cmd);
+                    }
+                    PaletteOutcome::Cancel => self.overlay = Overlay::None,
+                    PaletteOutcome::Stay => {}
+                },
+                Overlay::SnippetPicker(p) => match p.click(rect, row) {
+                    SnippetOutcome::Insert(body) => {
+                        self.overlay = Overlay::None;
+                        self.buf_mut().insert_str(body);
+                    }
+                    SnippetOutcome::Cancel => self.overlay = Overlay::None,
+                    SnippetOutcome::Stay => {}
+                },
+                Overlay::ProjectSearch(ps) => match ps.click(rect, col, row) {
+                    ProjectSearchAction::Open(path, line, col) => {
+                        self.overlay = Overlay::None;
+                        self.jump_to_match(path, line, col);
+                    }
+                    ProjectSearchAction::Cancel => self.overlay = Overlay::None,
+                    ProjectSearchAction::Requery => self.recompute_project_matches(),
+                    ProjectSearchAction::Stay => {}
+                },
+                Overlay::Projects(p) => match p.click(rect, row) {
+                    ProjectsAction::NewProject => {
+                        self.overlay = Overlay::Prompt(Box::new(PathPrompt::new_project(
+                            &default_save_seed(),
+                        )));
+                    }
+                    ProjectsAction::OpenProjectPrompt => {
+                        self.overlay =
+                            Overlay::Prompt(Box::new(PathPrompt::open(&default_save_seed())));
+                    }
+                    ProjectsAction::OpenRecent(path) => {
+                        self.overlay = Overlay::None;
+                        self.open_dir(path);
+                    }
+                    ProjectsAction::DeleteRecent(path) => self.request_delete_project(path),
+                    ProjectsAction::Cancel | ProjectsAction::Stay => {}
+                },
+                _ => {}
+            }
+            return true;
+        }
+
+        // The find bar's [Aa] / [.*] toggle buttons.
+        if let Some(s) = &mut self.search
+            && s.click(col, row)
+        {
+            self.recompute_matches();
+            self.reset_match_to_origin();
+            self.focus_current_match();
             return true;
         }
 
@@ -1275,6 +1634,19 @@ impl App {
         self.panel_height = Some(want.clamp(3, max.max(3)));
     }
 
+    /// `F11` / `F12`: grow / shrink the output panel a few rows at a time —
+    /// dragging the splitter is otherwise the *only* way to resize it, with
+    /// no keyboard path at all (and mouse support can be turned off entirely
+    /// via `Cmd::ToggleMouse`, so this isn't just a no-mouse-hardware case).
+    fn resize_panel_by(&mut self, rows: i32) {
+        let Some(splitter) = self.splitter_rect else {
+            self.set_status("no output panel to resize");
+            return;
+        };
+        let row = (i32::from(splitter.y) - rows).max(0) as u16;
+        self.resize_panel_to(row);
+    }
+
     /// Close the overlay the way its own Esc would (reverting a theme preview).
     fn dismiss_overlay(&mut self) {
         if let Overlay::ThemePicker(p) = &self.overlay {
@@ -1282,6 +1654,24 @@ impl App {
             self.preview_theme(original);
         }
         self.overlay = Overlay::None;
+    }
+
+    /// Mouse wheel while an overlay with a scrollable list is open.
+    fn scroll_overlay(&mut self, delta: isize) {
+        match &mut self.overlay {
+            Overlay::Palette(p) => p.scroll(delta),
+            Overlay::SnippetPicker(p) => p.scroll(delta),
+            Overlay::ProjectSearch(p) => p.scroll(delta),
+            Overlay::Projects(p) => p.scroll(delta),
+            Overlay::Help(h) => {
+                h.scroll = if delta < 0 {
+                    h.scroll.saturating_sub(1)
+                } else {
+                    h.scroll + 1
+                };
+            }
+            _ => {}
+        }
     }
 
     #[cfg(test)]
@@ -1478,6 +1868,72 @@ impl App {
                 }
                 true
             }
+            Overlay::SnippetPicker(p) => {
+                match p.handle_key(key) {
+                    SnippetOutcome::Stay => {}
+                    SnippetOutcome::Cancel => self.overlay = Overlay::None,
+                    SnippetOutcome::Insert(body) => {
+                        self.overlay = Overlay::None;
+                        self.buf_mut().insert_str(body);
+                    }
+                }
+                true
+            }
+            Overlay::GotoLine(g) => {
+                match g.handle_key(key) {
+                    GotoOutcome::Stay => {}
+                    GotoOutcome::Cancel => self.overlay = Overlay::None,
+                    GotoOutcome::Submit(n) => {
+                        self.overlay = Overlay::None;
+                        self.goto_line(n);
+                    }
+                }
+                true
+            }
+            Overlay::ProjectSearch(ps) => {
+                match ps.handle_key(key) {
+                    ProjectSearchAction::Stay => {}
+                    ProjectSearchAction::Requery => self.recompute_project_matches(),
+                    ProjectSearchAction::Cancel => self.overlay = Overlay::None,
+                    ProjectSearchAction::Open(path, line, col) => {
+                        self.overlay = Overlay::None;
+                        self.jump_to_match(path, line, col);
+                    }
+                }
+                true
+            }
+            Overlay::Projects(p) => {
+                match p.handle_key(key) {
+                    ProjectsAction::Stay => {}
+                    ProjectsAction::Cancel => self.overlay = Overlay::None,
+                    ProjectsAction::NewProject => {
+                        self.overlay = Overlay::Prompt(Box::new(PathPrompt::new_project(
+                            &default_save_seed(),
+                        )));
+                    }
+                    ProjectsAction::OpenProjectPrompt => {
+                        self.overlay =
+                            Overlay::Prompt(Box::new(PathPrompt::open(&default_save_seed())));
+                    }
+                    ProjectsAction::OpenRecent(path) => {
+                        self.overlay = Overlay::None;
+                        self.open_dir(path);
+                    }
+                    ProjectsAction::DeleteRecent(path) => self.request_delete_project(path),
+                }
+                true
+            }
+            Overlay::DeleteProject(d) => {
+                match d.handle_key(key) {
+                    DeleteOutcome::Stay => {}
+                    DeleteOutcome::Cancel => self.overlay = Overlay::None,
+                    DeleteOutcome::Confirmed(path) => {
+                        self.overlay = Overlay::None;
+                        self.delete_project(path);
+                    }
+                }
+                true
+            }
             Overlay::ThemePicker(picker) => {
                 match picker.handle_key(key) {
                     ThemePickerOutcome::Preview(i) => self.preview_theme(i),
@@ -1512,6 +1968,7 @@ impl App {
                 self.set_status(match kind {
                     PromptKind::Save => "save cancelled",
                     PromptKind::Open => "open cancelled",
+                    PromptKind::NewProject => "new project cancelled",
                 });
             }
             PromptOutcome::Submit(path) if path.is_empty() => {
@@ -1530,6 +1987,8 @@ impl App {
                     PromptKind::Open => {
                         self.open_file(PathBuf::from(&path)).map(|()| String::new())
                     }
+                    // `create_project` (via `open_dir`) sets its own status too.
+                    PromptKind::NewProject => self.create_project(&path).map(|()| String::new()),
                 };
                 match result {
                     Ok(msg) => {
@@ -1558,8 +2017,37 @@ impl App {
             KeyCode::F(6) => return self.toggle_output_focus(),
             KeyCode::F(7) => return self.toggle_algo(),
             KeyCode::F(2) => return self.toggle_files(),
+            KeyCode::F(3) => return self.open_snippet_picker(),
+            KeyCode::F(4) => return self.open_project_search(),
+            KeyCode::F(8) => return self.open_projects(),
+            KeyCode::F(9) => return self.close_output(),
+            KeyCode::F(11) => return self.resize_panel_by(3),
+            KeyCode::F(12) => return self.resize_panel_by(-3),
             KeyCode::F(1) => return self.open_help(),
             _ => {}
+        }
+        // File/view management shortcuts also work from any pane — previously
+        // these only fired from `handle_key_inner`, so e.g. Ctrl+O did nothing
+        // at all while focus was on the file tree or output panel. (Ctrl+C and
+        // Ctrl+W are deliberately NOT here: Ctrl+C copies the editor's
+        // selection in `handle_key_inner` but stops a running child in the
+        // output panel, and Ctrl+W closes the active tab everywhere except
+        // the output panel, where it closes *that* instead — a global
+        // binding would pick the wrong one in both cases.)
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('o') => {
+                    self.overlay =
+                        Overlay::Prompt(Box::new(PathPrompt::open(&default_save_seed())));
+                    return;
+                }
+                KeyCode::Char('n') => return self.new_tab(),
+                KeyCode::Char('s') => return self.save_active(),
+                KeyCode::Char('t') => return self.open_theme_picker(),
+                KeyCode::Char('f') => return self.open_search(),
+                KeyCode::Char('g') => return self.open_goto_line(),
+                _ => {}
+            }
         }
         if self.focus == Focus::Output {
             self.handle_output_key(key);
@@ -1594,7 +2082,11 @@ impl App {
     }
 
     /// Keystrokes while the output panel has focus: scrollback nav, a stdin line,
-    /// Esc back to the editor. `Ctrl+C` stops a running child (else quits).
+    /// Esc back to the editor. `Ctrl+C` stops a running child, same as a real
+    /// terminal's SIGINT — it no longer quits the app (that's `Ctrl+Q` only).
+    /// `Ctrl+W` closes the panel itself here, rather than the active file tab
+    /// like it does everywhere else — closing "this" makes more sense than
+    /// reaching past it to a tab you can't currently see.
     fn handle_output_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1607,9 +2099,11 @@ impl App {
                 KeyCode::Char('c') => {
                     if self.run.as_ref().is_some_and(RunConsole::is_running) {
                         self.stop_run();
-                    } else {
-                        self.request_quit();
                     }
+                    return;
+                }
+                KeyCode::Char('w') => {
+                    self.close_output();
                     return;
                 }
                 KeyCode::Char('p') => return self.open_palette(),
@@ -1630,6 +2124,8 @@ impl App {
         let running = r.is_running();
         match key.code {
             KeyCode::Esc => self.focus = Focus::Editor,
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Up => r.scroll_up(1),
             KeyCode::Down => r.scroll_down(1),
             KeyCode::PageUp => r.scroll_up(10),
@@ -1690,11 +2186,24 @@ impl App {
         // ---- app-level shortcuts (must not hold a &mut buffer) ----
         if ctrl {
             match key.code {
-                // Ctrl+Q / Ctrl+C: quits, but asks first if a buffer is unsaved.
-                // A modal `:` command line (BatScript wants Vim-like) is still
-                // Phase 1.5.
-                KeyCode::Char('q') | KeyCode::Char('c') => {
+                // Ctrl+Q quits (asks first if a buffer is unsaved). A modal
+                // `:` command line (BatScript wants Vim-like) is still Phase
+                // 1.5. Ctrl+C is copy — the near-universal convention — not
+                // a second quit key.
+                KeyCode::Char('q') => {
                     self.request_quit();
+                    return;
+                }
+                KeyCode::Char('c') => {
+                    self.copy_selection();
+                    return;
+                }
+                KeyCode::Char('v') => {
+                    self.paste();
+                    return;
+                }
+                KeyCode::Char('d') => {
+                    self.buf_mut().duplicate_line();
                     return;
                 }
                 KeyCode::Char('p') => {
@@ -1724,11 +2233,13 @@ impl App {
                     self.close_tab(false);
                     return;
                 }
-                KeyCode::PageDown | KeyCode::Tab => {
+                // Ctrl+Tab / Ctrl+Shift+Tab only — dropped the Ctrl+PgUp/PgDn
+                // aliases, which just duplicated this with no real upside.
+                KeyCode::Tab => {
                     self.next_tab();
                     return;
                 }
-                KeyCode::PageUp | KeyCode::BackTab => {
+                KeyCode::BackTab => {
                     self.prev_tab();
                     return;
                 }
@@ -1770,6 +2281,8 @@ impl App {
             KeyCode::Right if ctrl => b.move_word_right(shift),
             KeyCode::Left => b.move_left(shift),
             KeyCode::Right => b.move_right(shift),
+            KeyCode::Up if alt => b.move_line_up(),
+            KeyCode::Down if alt => b.move_line_down(),
             KeyCode::Up => b.move_up(shift),
             KeyCode::Down => b.move_down(shift),
             KeyCode::Home if ctrl => b.move_doc_start(shift),
@@ -1786,6 +2299,8 @@ impl App {
             // ---- edits ----
             KeyCode::Char(c) if !ctrl && !alt => b.insert_char(c),
             KeyCode::Enter => b.insert_char('\n'),
+            KeyCode::Backspace if ctrl => b.delete_word_backward(),
+            KeyCode::Delete if ctrl => b.delete_word_forward(),
             KeyCode::Backspace => b.delete_backward(),
             KeyCode::Delete => b.delete_forward(),
             KeyCode::Tab => {

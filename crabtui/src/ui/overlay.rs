@@ -27,6 +27,13 @@ pub enum Overlay {
     /// A yes / no / cancel question — currently only the unsaved-changes guard
     /// on quit.
     Confirm(Box<Confirm>),
+    SnippetPicker(Box<super::snippet_picker::SnippetPicker>),
+    GotoLine(Box<super::goto_line::GotoLine>),
+    ProjectSearch(Box<super::project_search::ProjectSearch>),
+    Projects(Box<super::projects::ProjectsPicker>),
+    /// The "type the folder name to confirm" dialog before an actual
+    /// `rm -rf` of a project directory.
+    DeleteProject(Box<super::projects::DeleteConfirm>),
 }
 
 impl Overlay {
@@ -39,6 +46,9 @@ impl Overlay {
 pub enum PromptKind {
     Save,
     Open,
+    /// `F8` Projects picker › "+ New Project…" — an existing directory is
+    /// just opened; a path that doesn't exist yet is created and seeded.
+    NewProject,
 }
 
 /// What the app should do with a key the path prompt just consumed.
@@ -68,6 +78,10 @@ impl PathPrompt {
         Self::seeded(seed, PromptKind::Open)
     }
 
+    pub fn new_project(seed: &str) -> Self {
+        Self::seeded(seed, PromptKind::NewProject)
+    }
+
     fn seeded(seed: &str, kind: PromptKind) -> Self {
         let mut input = Buffer::from_str(seed);
         input.move_doc_end(false);
@@ -86,6 +100,7 @@ impl PathPrompt {
         match self.kind {
             PromptKind::Save => " Save As ",
             PromptKind::Open => " Open File ",
+            PromptKind::NewProject => " New Project ",
         }
     }
 
@@ -93,6 +108,7 @@ impl PathPrompt {
         match self.kind {
             PromptKind::Save => "      Enter save · Esc cancel",
             PromptKind::Open => "      Enter open · Esc cancel",
+            PromptKind::NewProject => "      Enter create/open · Esc cancel",
         }
     }
 
@@ -278,10 +294,10 @@ pub fn render_prompt(f: &mut Frame, prompt: &PathPrompt, theme: &Theme, area: Re
         )));
         lines.push(Line::default());
     }
-    let verb = if prompt.kind == PromptKind::Save {
-        "[ Save ]"
-    } else {
-        "[ Open ]"
+    let verb = match prompt.kind {
+        PromptKind::Save => "[ Save ]",
+        PromptKind::Open => "[ Open ]",
+        PromptKind::NewProject => "[ Create ]",
     };
     lines.push(Line::from(vec![
         Span::styled("[ Cancel ]", muted),

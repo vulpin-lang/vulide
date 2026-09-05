@@ -284,8 +284,9 @@ mod tests {
         assert_eq!(h.app.diagnostics.len(), 1);
         assert!(h.contains("⚠ 1 undefined var"), "status:\n{}", h.screen());
 
-        // the flagged span is red in the editor (col 3 + 4-wide gutter)
-        let cell = h.cell(7, 1); // the 'n' of `naem` on row 1
+        // the flagged span is red in the editor (col 3 + 5-wide gutter,
+        // which now reserves 1 extra column for the hex-color swatch)
+        let cell = h.cell(8, 1); // the 'n' of `naem` on row 1
         assert_eq!(cell.fg, h.app.theme.output_err);
         assert!(cell.modifier.contains(ratatui::style::Modifier::UNDERLINED));
     }
@@ -485,11 +486,11 @@ mod tests {
         h.type_str("second");
         assert!(h.contains("[2/2]")); // status bar shows the tab count
 
-        h.key_mods(KeyCode::PageUp, KeyModifiers::CONTROL); // prev tab
+        h.key_mods(KeyCode::BackTab, KeyModifiers::CONTROL); // prev tab
         assert_eq!(h.app.active, 0);
         assert_eq!(h.app.buf().rope().to_string(), "first");
 
-        h.key_mods(KeyCode::PageDown, KeyModifiers::CONTROL); // next tab
+        h.key_mods(KeyCode::Tab, KeyModifiers::CONTROL); // next tab
         assert_eq!(h.app.active, 1);
 
         // dirty tab won't close without discard
@@ -572,7 +573,10 @@ mod tests {
     #[test]
     fn word_wrap_flows_a_long_line_onto_several_rows() {
         let long = "G \"".to_string() + &"ab ".repeat(20) + "\"";
-        let mut h = Harness::with_text(&long, 30, 10);
+        // +1 vs. the old fixture width: the gutter grew by one column for
+        // the hex-color swatch, so this keeps the same text width (and so
+        // the same wrap boundaries) as before that change.
+        let mut h = Harness::with_text(&long, 31, 10);
 
         // wrap off: the tail is not on screen
         assert!(!h.contains("ab \""), "no wrap yet:\n{}", h.screen());
@@ -590,7 +594,7 @@ mod tests {
             "cont row 2:\n{}",
             h.screen()
         );
-        assert!(h.line(1).starts_with("    "), "continuation gutter blank");
+        assert!(h.line(1).starts_with("     "), "continuation gutter blank");
     }
 
     #[test]
@@ -604,6 +608,35 @@ mod tests {
         h.draw();
         let (_cx, cy) = h.cursor_xy();
         assert!(cy >= 2, "cursor rode the wrap down to row {cy}");
+    }
+
+    // ---- hex-color gutter swatch ----
+
+    #[test]
+    fn a_hex_color_shows_a_matching_swatch_in_the_gutter() {
+        let h = Harness::with_text("hex = \"#00FF00\"\nplain line\n", 60, 8);
+        // The swatch sits at the leftmost gutter column, before the number.
+        assert_eq!(h.cell(0, 0).fg, ratatui::style::Color::Rgb(0, 255, 0));
+        assert_eq!(h.line(0).chars().next(), Some('●'));
+        // A line with no hex color gets a blank swatch column, not a stale one.
+        assert_ne!(h.line(1).chars().next(), Some('●'));
+    }
+
+    #[test]
+    fn the_swatch_column_does_not_depend_on_line_number_padding() {
+        // Enough lines that later ones have no spare leading padding in the
+        // line-number field — the swatch must still show up regardless.
+        let mut text = String::new();
+        for i in 1..=15 {
+            text.push_str(&format!("line {i}\n"));
+        }
+        text.push_str("color here #ABCDEF\n");
+        let h = Harness::with_text(&text, 60, 20);
+        let row = 15u16; // 0-indexed row of the "color here" line
+        assert_eq!(
+            h.cell(0, row).fg,
+            ratatui::style::Color::Rgb(0xAB, 0xCD, 0xEF)
+        );
     }
 
     #[test]
@@ -652,7 +685,7 @@ mod tests {
     fn toggle_line_numbers_via_palette() {
         let mut h = Harness::with_text("G\"x\"", 40, 8);
         assert!(
-            h.line(0).starts_with("  1 "),
+            h.line(0).starts_with("   1 "),
             "gutter present: {:?}",
             h.line(0)
         );
@@ -824,8 +857,17 @@ mod tests {
         h.key(KeyCode::F(1));
         assert!(h.contains("Keys & Shortcuts"));
         assert!(h.contains("save (Save As if untitled)"));
-        assert!(h.contains("command palette"));
         assert!(h.contains("run the current file"));
+        // The card has grown past what a 44-row terminal shows in one page —
+        // "command palette" is further down, in "View & commands".
+        for _ in 0..200 {
+            h.key(KeyCode::Down);
+        }
+        assert!(
+            h.contains("command palette"),
+            "scrolled into view:\n{}",
+            h.screen()
+        );
         h.key(KeyCode::Esc);
         assert!(!h.app.overlay.is_open());
 
@@ -833,10 +875,10 @@ mod tests {
         let mut h = Harness::new(90, 14);
         h.key(KeyCode::F(1));
         assert!(h.contains("Keys & Shortcuts"));
-        for _ in 0..40 {
+        for _ in 0..200 {
             h.key(KeyCode::Down);
         }
-        assert!(h.contains("this help"), "scroll reached the last section");
+        assert!(h.contains("Shift + drag"), "scroll reached the last line");
     }
 
     #[test]
@@ -939,6 +981,86 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_w_in_the_output_panel_closes_the_panel_not_a_tab() {
+        let mut h = Harness::with_text("first", 70, 20);
+        h.ctrl('n'); // second tab, so a wrong close would be visible
+        assert_eq!(h.app.buffers.len(), 2);
+        h.app.start_run_argv(vec!["sleep".into(), "30".into()]);
+        h.pump();
+        h.app.focus = crate::app::Focus::Output;
+
+        h.ctrl('w');
+        assert!(h.app.run.is_none(), "the panel closed");
+        assert_eq!(h.app.buffers.len(), 2, "no tab was closed");
+        assert_eq!(h.app.focus, crate::app::Focus::Editor);
+    }
+
+    #[test]
+    fn ctrl_w_still_closes_the_active_tab_from_files_and_outline_focus() {
+        let dir = std::env::temp_dir().join(format!("vulide_ctrlw_files_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut h = Harness::new(80, 20);
+        h.app.open_path(dir.clone()).unwrap(); // opens the file tree, one tab
+        h.ctrl('n'); // a second, clean tab so Ctrl+W has something safe to close
+        assert_eq!(h.app.buffers.len(), 2);
+        h.app.focus = crate::app::Focus::Files;
+
+        h.ctrl('w');
+        assert_eq!(
+            h.app.buffers.len(),
+            1,
+            "Ctrl+W still closed a tab from Files focus"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f9_closes_the_output_panel_with_no_mouse() {
+        let mut h = Harness::new(70, 20);
+        h.app.start_run_argv(vec!["sleep".into(), "30".into()]);
+        h.pump();
+        assert!(h.app.run.is_some());
+        h.key(KeyCode::F(9));
+        assert!(h.app.run.is_none(), "output panel closed");
+        assert_eq!(h.app.focus, crate::app::Focus::Editor);
+    }
+
+    #[test]
+    fn f9_with_no_output_panel_is_a_harmless_no_op() {
+        let mut h = Harness::new(70, 20);
+        h.key(KeyCode::F(9));
+        assert!(h.app.run.is_none());
+        assert!(!h.app.should_quit());
+    }
+
+    #[test]
+    fn f11_and_f12_resize_the_output_panel_with_no_mouse() {
+        let mut h = Harness::new(80, 30);
+        h.app.start_run_argv(vec!["sleep".into(), "30".into()]);
+        h.pump();
+        let start_h = h.app.panel_rect.expect("panel").height;
+
+        h.key(KeyCode::F(11)); // grow
+        let grown = h.app.panel_rect.expect("panel").height;
+        assert!(grown > start_h, "panel {start_h} -> {grown}");
+
+        h.key(KeyCode::F(12)); // shrink
+        h.key(KeyCode::F(12));
+        let shrunk = h.app.panel_rect.expect("panel").height;
+        assert!(shrunk < grown, "panel {grown} -> {shrunk}");
+
+        h.app.stop_run();
+    }
+
+    #[test]
+    fn f11_with_no_output_panel_says_so_instead_of_panicking() {
+        let mut h = Harness::new(80, 30);
+        h.key(KeyCode::F(11));
+        assert!(h.contains("no output panel to resize"));
+    }
+
+    #[test]
     fn clicking_a_tab_switches_and_its_x_closes_it() {
         let mut h = Harness::new(70, 14);
         h.ctrl('n');
@@ -993,7 +1115,8 @@ mod tests {
         assert_eq!(h.app.search_matches.len(), 3);
         h.key_mods(KeyCode::Char('c'), KeyModifiers::ALT); // Alt+C
         assert_eq!(h.app.search_matches.len(), 1);
-        assert!(h.contains("case: on"));
+        assert!(h.app.search.as_ref().unwrap().case_sensitive);
+        assert!(h.contains("[Aa]"));
     }
 
     #[test]
@@ -1163,7 +1286,7 @@ mod tests {
 
         assert!(h.contains(" Python "), "status bar:\n{}", h.line(11));
         // `def` is a keyword → theme.keyword colour on the first cell
-        assert_eq!(h.cell(4, 0).fg, h.app.theme.keyword); // past the 4-col gutter
+        assert_eq!(h.cell(5, 0).fg, h.app.theme.keyword); // past the 5-col gutter
         // the Vulpin `$undef` lint must NOT fire on a Python buffer
         assert!(h.app.diagnostics.is_empty(), "no Vulpin lint off-grammar");
 
@@ -1179,7 +1302,7 @@ mod tests {
         h.draw();
         assert!(h.contains(" Plain "));
         // `if` gets no keyword colour — falls back to plain fg
-        assert_eq!(h.cell(4, 0).fg, h.app.theme.fg);
+        assert_eq!(h.cell(5, 0).fg, h.app.theme.fg);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1458,5 +1581,512 @@ mod tests {
         assert_eq!(h.app.hovered_tab, Some(0));
         h.mouse_move(0, 10); // move away (into the editor)
         assert_eq!(h.app.hovered_tab, None);
+    }
+
+    // ---- Ctrl+C is copy, not a second quit key ----
+
+    #[test]
+    fn ctrl_c_in_the_editor_never_quits() {
+        let mut h = Harness::with_text("hello world", 60, 10);
+        h.key(KeyCode::Right); // no selection
+        h.ctrl('c');
+        assert!(!h.app.should_quit());
+        assert!(!h.app.overlay.is_open(), "no quit-confirm popped up either");
+    }
+
+    #[test]
+    fn ctrl_c_with_no_selection_says_so_instead_of_copying() {
+        let mut h = Harness::with_text("hello world", 60, 10);
+        h.ctrl('c');
+        assert!(h.contains("nothing selected"));
+    }
+
+    #[test]
+    fn ctrl_c_with_a_selection_attempts_a_copy_and_never_quits() {
+        let mut h = Harness::with_text("hello world", 60, 10);
+        h.key_mods(KeyCode::Right, KeyModifiers::SHIFT);
+        h.key_mods(KeyCode::Right, KeyModifiers::SHIFT);
+        assert!(h.app.buf().selection_text().is_some());
+        h.ctrl('c');
+        assert!(!h.app.should_quit());
+        // No display server in a test sandbox, so this usually fails — but it
+        // must fail *softly* (a status message), never quit or panic.
+        assert!(h.contains("copied") || h.contains("copy failed"));
+    }
+
+    #[test]
+    fn ctrl_v_pastes_and_never_quits() {
+        let mut h = Harness::with_text("hello", 60, 10);
+        h.ctrl('v');
+        assert!(!h.app.should_quit());
+        // No display server in a test sandbox, so this usually has nothing
+        // to paste — it must fail *softly* (a status message), never panic.
+        assert!(h.contains("paste failed") || h.app.buf().rope() != "hello");
+    }
+
+    #[test]
+    fn ctrl_d_duplicates_the_current_line() {
+        let mut h = Harness::with_text("one\ntwo\nthree", 60, 10);
+        h.key(KeyCode::Down); // cursor onto "two"
+        h.ctrl('d');
+        assert_eq!(h.app.buf().rope().to_string(), "one\ntwo\ntwo\nthree");
+        assert_eq!(h.app.buf().cursor().line, 2);
+    }
+
+    #[test]
+    fn alt_up_and_down_move_the_current_line() {
+        let mut h = Harness::with_text("one\ntwo\nthree", 60, 10);
+        h.key(KeyCode::Down); // cursor onto "two"
+        h.key_mods(KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(h.app.buf().rope().to_string(), "two\none\nthree");
+        assert_eq!(h.app.buf().cursor().line, 0);
+
+        h.key_mods(KeyCode::Down, KeyModifiers::ALT);
+        assert_eq!(h.app.buf().rope().to_string(), "one\ntwo\nthree");
+        assert_eq!(h.app.buf().cursor().line, 1);
+    }
+
+    #[test]
+    fn ctrl_backspace_and_delete_remove_whole_words() {
+        let mut h = Harness::with_text("foo bar baz", 60, 10);
+        h.app
+            .buf_mut()
+            .set_cursor(Position { line: 0, col: 11 }, false);
+        h.key_mods(KeyCode::Backspace, KeyModifiers::CONTROL);
+        assert_eq!(h.app.buf().rope().to_string(), "foo bar ");
+
+        h.app
+            .buf_mut()
+            .set_cursor(Position { line: 0, col: 0 }, false);
+        h.key_mods(KeyCode::Delete, KeyModifiers::CONTROL);
+        assert_eq!(h.app.buf().rope().to_string(), "bar ");
+    }
+
+    #[test]
+    fn ctrl_c_in_the_output_panel_without_a_running_process_does_not_quit() {
+        let mut h = Harness::with_text("G\"hi\"\n", 60, 10);
+        h.app.focus = crate::app::Focus::Output; // no process ever started
+        h.ctrl('c');
+        assert!(!h.app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_q_still_quits() {
+        let mut h = Harness::with_text("hello", 60, 10);
+        h.ctrl('q');
+        h.key(KeyCode::Char('n')); // discard & quit (no unsaved-file save prompt)
+        assert!(h.app.should_quit());
+    }
+
+    #[test]
+    fn the_active_tab_is_legible_not_dark_text_on_a_near_black_background() {
+        let mut h = Harness::new(70, 8);
+        h.ctrl('n');
+        let active = h.app.tab_hits[h.app.active];
+        let cell = h.cell(active.rect.x + 2, active.rect.y);
+        assert_eq!(
+            cell.fg, h.app.theme.fg,
+            "bright text, not a background tint"
+        );
+        assert_eq!(
+            cell.bg, h.app.theme.tab_active,
+            "the tab's own highlighted bg"
+        );
+        assert_ne!(
+            cell.fg, cell.bg,
+            "foreground and background must not collapse to the same color"
+        );
+    }
+
+    // ---- go to line (Ctrl+G) ----
+
+    #[test]
+    fn ctrl_g_jumps_the_cursor_to_a_line() {
+        let text = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut h = Harness::with_text(&text, 80, 14);
+        h.ctrl('g');
+        assert!(h.contains("Go to Line"));
+        h.type_str("7");
+        h.key(KeyCode::Enter);
+        assert!(!h.app.overlay.is_open());
+        assert_eq!(h.app.buf().cursor().line, 6); // 1-based 7 -> 0-based 6
+        assert!(h.contains("line 7"));
+    }
+
+    #[test]
+    fn ctrl_g_clamps_a_too_large_line_to_the_last_line() {
+        let text = "a\nb\nc";
+        let mut h = Harness::with_text(text, 80, 14);
+        h.ctrl('g');
+        h.type_str("999");
+        h.key(KeyCode::Enter);
+        assert_eq!(h.app.buf().cursor().line, 2); // clamped to the last line
+    }
+
+    #[test]
+    fn ctrl_g_rejects_non_numeric_input_and_stays_open() {
+        let mut h = Harness::with_text("only line", 80, 14);
+        h.ctrl('g');
+        h.key(KeyCode::Enter); // empty field
+        assert!(h.app.overlay.is_open(), "stays open on a bad entry");
+        assert!(h.contains("enter a line number"));
+        h.key(KeyCode::Esc);
+        assert!(!h.app.overlay.is_open());
+    }
+
+    // ---- project-wide search (F4) ----
+
+    fn psearch_fixture(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("vulide_psearch_it_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.vul"), "G\"hello\"\nP\"needle_marker\"\n").unwrap();
+        std::fs::write(dir.join("other.vul"), "K x\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn f4_finds_a_match_and_enter_jumps_to_it() {
+        let dir = psearch_fixture("jump");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("other.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        assert!(h.contains("Find in Files"));
+        h.type_str("needle_marker");
+        assert!(
+            h.contains("main.vul:2"),
+            "shows the match location:\n{}",
+            h.screen()
+        );
+
+        h.key(KeyCode::Enter);
+        assert!(!h.app.overlay.is_open());
+        assert!(h.app.buf().path().unwrap().ends_with("main.vul"));
+        assert_eq!(h.app.buf().cursor().line, 1);
+        assert_eq!(
+            h.app.buffers.len(),
+            2,
+            "opened in a new tab, other.vul stayed open"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f4_search_is_case_insensitive_and_reuses_an_open_tab() {
+        let dir = psearch_fixture("reuse");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("main.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        h.type_str("NEEDLE_MARKER");
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open());
+        assert_eq!(
+            h.app.buffers.len(),
+            1,
+            "main.vul was already open — no new tab"
+        );
+        assert_eq!(h.app.buf().cursor().line, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f4_on_a_non_matching_query_shows_no_matches() {
+        let dir = psearch_fixture("nomatch");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("main.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        h.type_str("xyzzy_not_here");
+        assert!(h.contains("no matches"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f4_esc_cancels_without_moving_the_cursor() {
+        let dir = psearch_fixture("cancel");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("main.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        h.type_str("needle_marker");
+        h.key(KeyCode::Esc);
+        assert!(!h.app.overlay.is_open());
+        assert_eq!(h.app.buf().cursor().line, 0, "cursor untouched by cancel");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_bar_regex_mode_matches_a_pattern() {
+        let mut h = Harness::with_text("a1 b22 c333", 60, 10);
+        h.ctrl('f');
+        h.type_str("foo"); // not a valid match yet — just checking the toggle works either order
+        h.key_mods(KeyCode::Char('x'), KeyModifiers::ALT); // Alt+X: regex on
+        assert!(h.app.search.as_ref().unwrap().regex);
+        assert!(h.contains("[.*]"));
+        for _ in 0..3 {
+            h.key(KeyCode::Backspace);
+        }
+        h.type_str(r"\d+");
+        assert_eq!(h.app.search_matches.len(), 3);
+    }
+
+    #[test]
+    fn find_bar_shows_the_regex_compiler_error_inline() {
+        let mut h = Harness::with_text("anything", 60, 10);
+        h.ctrl('f');
+        h.key_mods(KeyCode::Char('x'), KeyModifiers::ALT); // Alt+X: regex on
+        h.type_str("(unclosed");
+        assert!(h.contains("regex error"));
+        assert!(h.app.search_matches.is_empty());
+    }
+
+    #[test]
+    fn clicking_the_find_bar_buttons_toggles_case_and_regex() {
+        let mut h = Harness::with_text("Foo foo", 60, 10);
+        h.ctrl('f');
+        h.type_str("foo");
+        assert_eq!(h.app.search_matches.len(), 2);
+
+        let case_rect = h.app.search.as_ref().unwrap().case_rect.unwrap();
+        h.click(case_rect.x, case_rect.y);
+        assert!(h.app.search.as_ref().unwrap().case_sensitive);
+        assert_eq!(h.app.search_matches.len(), 1, "clicking [Aa] requeried");
+
+        let regex_rect = h.app.search.as_ref().unwrap().regex_rect.unwrap();
+        h.click(regex_rect.x, regex_rect.y);
+        assert!(h.app.search.as_ref().unwrap().regex);
+    }
+
+    #[test]
+    fn f4_regex_mode_matches_a_pattern_across_files() {
+        let dir = psearch_fixture("regex");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("main.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        h.key_mods(KeyCode::Char('x'), KeyModifiers::ALT); // Alt+X: regex on
+        match &h.app.overlay {
+            crate::ui::overlay::Overlay::ProjectSearch(ps) => assert!(ps.regex),
+            _ => panic!("expected the project search overlay to stay open"),
+        }
+        assert!(h.contains("[.*]"));
+        h.type_str("need.e_marker");
+        assert!(h.contains("main.vul:2"), "regex matched:\n{}", h.screen());
+
+        h.key(KeyCode::Enter);
+        assert!(!h.app.overlay.is_open());
+        assert_eq!(h.app.buf().cursor().line, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f4_shows_the_regex_compiler_error_inline() {
+        let dir = psearch_fixture("regex_err");
+        let mut h = Harness::new(90, 20);
+        h.app.open_path(dir.join("main.vul")).unwrap();
+
+        h.key(KeyCode::F(4));
+        h.key_mods(KeyCode::Char('x'), KeyModifiers::ALT); // Alt+X: regex on
+        h.type_str("(unclosed");
+        assert!(h.contains("regex error"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Projects (F8): new / open / delete ----
+
+    fn fresh_temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("vulide_projects_it_{tag}_{}", std::process::id()))
+    }
+
+    #[test]
+    fn f8_new_project_scaffolds_a_starter_file_and_opens_it() {
+        let mut h = Harness::new(80, 20);
+        let dir = fresh_temp_dir("new");
+        std::fs::remove_dir_all(&dir).ok(); // must not already exist
+
+        h.key(KeyCode::F(8));
+        assert!(h.contains("Projects"));
+        h.key(KeyCode::Enter); // row 0: "+ New Project..."
+        assert!(h.contains("New Project"));
+        for _ in 0..300 {
+            h.key(KeyCode::Backspace); // clear the cwd/ seed
+        }
+        h.type_str(dir.to_str().unwrap());
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open());
+        assert!(dir.join("main.vul").is_file(), "scaffolded a starter file");
+        assert_eq!(h.app.focus, crate::app::Focus::Files);
+        assert_eq!(
+            h.app.file_tree.as_ref().unwrap().root,
+            dir.canonicalize().unwrap()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f8_new_project_on_an_existing_directory_does_not_scaffold_over_it() {
+        let mut h = Harness::new(80, 20);
+        let dir = fresh_temp_dir("existing");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keepme.txt"), "do not touch").unwrap();
+
+        h.key(KeyCode::F(8));
+        h.key(KeyCode::Enter);
+        for _ in 0..300 {
+            h.key(KeyCode::Backspace);
+        }
+        h.type_str(dir.to_str().unwrap());
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open());
+        assert!(
+            !dir.join("main.vul").exists(),
+            "no scaffold on a real folder"
+        );
+        assert!(dir.join("keepme.txt").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f8_lists_and_opens_a_recent_project() {
+        let mut h = Harness::new(80, 20);
+        let dir = fresh_temp_dir("recent");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        h.app
+            .config
+            .recent_projects
+            .push(dir.canonicalize().unwrap());
+
+        h.key(KeyCode::F(8));
+        assert!(h.contains(&dir.display().to_string()));
+        h.key(KeyCode::Down); // -> "+ Open Project..."
+        h.key(KeyCode::Down); // -> the recent entry
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open());
+        assert_eq!(
+            h.app.file_tree.as_ref().unwrap().root,
+            dir.canonicalize().unwrap()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f8_delete_refuses_the_currently_open_project() {
+        let mut h = Harness::new(80, 20);
+        let dir = fresh_temp_dir("refuse_open");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        h.app.open_path(dir.clone()).unwrap(); // opens it as the file tree root — also
+        // registers it as recent_projects[0]
+
+        h.key(KeyCode::F(8));
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Delete);
+        assert!(h.contains("Delete Project"));
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        h.type_str(name);
+        h.key(KeyCode::Enter);
+
+        // The typed name matched, so the dialog closes — but the actual
+        // rm -rf is still refused, and that shows up as a status message.
+        assert!(!h.app.overlay.is_open());
+        assert!(h.contains("open a different file or folder"));
+        assert!(dir.exists(), "refused: directory must survive");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn f8_delete_requires_typing_the_exact_name_then_removes_the_directory() {
+        let mut h = Harness::new(80, 20);
+        let victim = fresh_temp_dir("victim");
+        std::fs::remove_dir_all(&victim).ok();
+        std::fs::create_dir_all(&victim).unwrap();
+        // Keep a different directory as the open project so the "currently
+        // open" guard doesn't fire for the one we're deleting. Opening it
+        // registers it as recent_projects[0] — put the victim at the front
+        // instead, so "Down, Down" from the picker's action rows lands on it.
+        let other = fresh_temp_dir("other_open");
+        std::fs::remove_dir_all(&other).ok();
+        std::fs::create_dir_all(&other).unwrap();
+        h.app.open_path(other.clone()).unwrap();
+        h.app
+            .config
+            .recent_projects
+            .insert(0, victim.canonicalize().unwrap());
+
+        h.key(KeyCode::F(8));
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Delete);
+        assert!(h.contains("Delete Project"));
+
+        // Wrong name: stays open, shows an error, directory untouched.
+        h.type_str("not-the-right-name");
+        h.key(KeyCode::Enter);
+        assert!(h.app.overlay.is_open());
+        assert!(h.contains("exactly"));
+        assert!(victim.exists());
+
+        for _ in 0..40 {
+            h.key(KeyCode::Backspace);
+        }
+        let name = victim.file_name().unwrap().to_str().unwrap();
+        h.type_str(name);
+        h.key(KeyCode::Enter);
+
+        assert!(!h.app.overlay.is_open());
+        assert!(!victim.exists(), "confirmed delete actually removed it");
+        assert!(
+            !h.app
+                .config
+                .recent_projects
+                .contains(&victim.canonicalize().unwrap_or_else(|_| victim.clone()))
+        );
+
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn f8_esc_cancels_the_delete_dialog_without_touching_the_directory() {
+        let mut h = Harness::new(80, 20);
+        let dir = fresh_temp_dir("esc_cancel");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        h.app
+            .config
+            .recent_projects
+            .push(dir.canonicalize().unwrap());
+
+        h.key(KeyCode::F(8));
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Down);
+        h.key(KeyCode::Delete);
+        h.key(KeyCode::Esc);
+
+        assert!(!h.app.overlay.is_open());
+        assert!(dir.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

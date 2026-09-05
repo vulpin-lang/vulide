@@ -32,6 +32,10 @@ pub struct Config {
     pub auto_save: bool,
     pub recent_files: Vec<PathBuf>,
     pub recent_files_limit: usize,
+    /// Directories opened as a project (`Ctrl+O` on a folder, or the `F8`
+    /// Projects picker) — most-recent first.
+    pub recent_projects: Vec<PathBuf>,
+    pub recent_projects_limit: usize,
     /// Reopen the previous session's files on launch (when no file is given).
     /// The file list itself lives in `$XDG_STATE_HOME/vulide/session.toml`
     /// (see `crate::session`), not here.
@@ -56,6 +60,8 @@ impl Default for Config {
             auto_save: false,
             recent_files: Vec::new(),
             recent_files_limit: 10,
+            recent_projects: Vec::new(),
+            recent_projects_limit: 10,
             restore_session: true,
             vulpin_path: String::new(),
         }
@@ -119,10 +125,21 @@ impl Config {
         self.recent_files.truncate(self.recent_files_limit.max(1));
     }
 
+    /// Record `path` as the most-recently-opened project directory.
+    pub fn push_recent_project(&mut self, path: &Path) {
+        let path = path.to_path_buf();
+        self.recent_projects.retain(|p| p != &path);
+        self.recent_projects.insert(0, path);
+        self.recent_projects
+            .truncate(self.recent_projects_limit.max(1));
+    }
+
     fn clamp(&mut self) {
         self.tab_width = self.tab_width.clamp(1, 16);
         self.recent_files_limit = self.recent_files_limit.clamp(1, 100);
         self.recent_files.truncate(self.recent_files_limit);
+        self.recent_projects_limit = self.recent_projects_limit.clamp(1, 100);
+        self.recent_projects.truncate(self.recent_projects_limit);
     }
 }
 
@@ -171,6 +188,21 @@ mod tests {
                 PathBuf::from("/a"),
                 PathBuf::from("/c")
             ]
+        );
+    }
+
+    #[test]
+    fn push_recent_project_dedupes_and_caps() {
+        let mut cfg = Config {
+            recent_projects_limit: 2,
+            ..Config::default()
+        };
+        for p in ["/proj-a", "/proj-b", "/proj-a", "/proj-c"] {
+            cfg.push_recent_project(Path::new(p));
+        }
+        assert_eq!(
+            cfg.recent_projects,
+            vec![PathBuf::from("/proj-c"), PathBuf::from("/proj-a")]
         );
     }
 }

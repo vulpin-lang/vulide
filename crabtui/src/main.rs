@@ -11,14 +11,17 @@
 mod algo;
 mod app;
 mod buffer;
+mod colorswatch;
 mod complete;
 mod config;
 mod event;
 mod filetree;
 mod lint;
+mod matcher;
 mod run;
 mod search;
 mod session;
+mod snippets;
 mod syntax;
 mod theme;
 mod ui;
