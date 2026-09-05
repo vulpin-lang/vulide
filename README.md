@@ -55,7 +55,11 @@ VulIDE has many cool features that let you write code easier!
 
 ## Keys
 Ctrl+H: Show a list of all possible keys
+
 Ctrl+N: Create a New tab
+
 Ctrl+S: Save
+
 Ctrl+Q: quit
+
 and more!...
