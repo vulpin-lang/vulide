@@ -3,11 +3,9 @@
 //! `Language::Vulpin`.
 //!
 //! Every one of these is run against the real interpreter before landing
-//! here, not guessed from the grammar. Two of the language's own footguns
-//! are easy to get wrong and show up below: the `K` type char is a bareword
-//! (`Kvar"prompt: "S`, not `Kvar"prompt: ""S"`), and there's deliberately no
-//! `for` snippet — `O` currently heap-overflows on the interpreter's `General`
-//! tip (reported upstream), so shipping one would hand people a crash.
+//! here, not guessed from the grammar. One footgun shows up below: the `K`
+//! type char must be a *string* (`Kn"number: ""I"`) — the VM ignores a bare
+//! `I`, so `Kn"number: "I` silently reads a string.
 
 pub struct Snippet {
     pub name: &'static str,
@@ -24,8 +22,16 @@ pub const SNIPPETS: &[Snippet] = &[
         body: "? cond\n    \n:\n    \n;",
     },
     Snippet {
+        name: "if / else if / else",
+        body: "? cond\n    \n:? cond\n    \n:\n    \n;",
+    },
+    Snippet {
         name: "while",
         body: "@ cond\n    \n&",
+    },
+    Snippet {
+        name: "for",
+        body: "O i 0 10\n    G i\n&",
     },
     Snippet {
         name: "function",
@@ -33,7 +39,7 @@ pub const SNIPPETS: &[Snippet] = &[
     },
     Snippet {
         name: "try / catch",
-        body: "T\n    \nCerr\n    G err\nY",
+        body: "T\n    \nC\"err\"\n    G err\nY",
     },
     Snippet {
         name: "switch",
@@ -44,8 +50,20 @@ pub const SNIPPETS: &[Snippet] = &[
         body: "G\"\"",
     },
     Snippet {
+        name: "format string",
+        body: "G $\"Hello {name}\"",
+    },
+    Snippet {
         name: "input",
-        body: "Kvar\"prompt: \"S",
+        body: "Kname\"prompt: \"",
+    },
+    Snippet {
+        name: "input (integer)",
+        body: "Kn\"number: \"\"I\"",
+    },
+    Snippet {
+        name: "list comprehension",
+        body: "[x * 2 | x <- items]",
     },
     Snippet {
         name: "import",
@@ -58,5 +76,9 @@ pub const SNIPPETS: &[Snippet] = &[
     Snippet {
         name: "jump",
         body: "J name",
+    },
+    Snippet {
+        name: "exit with code",
+        body: "Q 1",
     },
 ];

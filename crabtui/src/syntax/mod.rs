@@ -1,9 +1,10 @@
 //! Syntax tokenizing.
 //!
-//! Tokenizers are **single-line**: no cross-line state. That is exact for
-//! Vulpin (a line-oriented language) and good enough for the others — a block
-//! comment (`/* … */`) that spans lines is only coloured on the lines where it
-//! opens or closes. The Python IDE's highlighter is line-based too.
+//! Tokenizers are **line-based**. Vulpin carries one bit of state across lines
+//! — a string still open at the line's end ([`vulpin::Open`]), since every
+//! Vulpin string may span lines. The others carry none and are good enough
+//! that way: a block comment (`/* … */`) that spans lines is only coloured on
+//! the lines where it opens or closes.
 
 pub mod generic;
 pub mod markdown;
@@ -106,6 +107,16 @@ impl Language {
             Language::Json => generic::tokenize(line, &generic::JSON),
             Language::Markdown => markdown::tokenize(line),
             Language::Plain => Vec::new(),
+        }
+    }
+
+    /// Like [`Self::tokenize_line`], but starting inside `open` (the state at
+    /// the end of the previous line), and returning the state at this line's
+    /// end. Only Vulpin has state; other languages pass `None` through.
+    pub fn tokenize_line_from(self, line: &str, open: vulpin::Open) -> (Vec<Token>, vulpin::Open) {
+        match self {
+            Language::Vulpin => vulpin::tokenize_from(line, open),
+            _ => (self.tokenize_line(line), None),
         }
     }
 }

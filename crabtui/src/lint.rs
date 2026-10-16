@@ -1,9 +1,13 @@
 //! Lightweight static checks surfaced inline in the editor.
 //!
-//! Vulpin evaluates an undefined `$name` to `None` *silently* (`Vulpin/src/vm.c`,
-//! `eval_expr` / `ND_IDENT`: no entry in `vm->vars` → `val_none()`, no error,
-//! exit 0). A typo'd variable therefore prints `None` instead of failing. This
-//! flags every `$name` whose `name` is never defined anywhere in the buffer.
+//! Vulpin evaluates an undefined variable to `None` *silently* (`Vulpin/src/vm.c`,
+//! `ee` / `ND_IDENT`: no entry in the variable table → `vn()`, no error, exit
+//! 0). A typo'd variable therefore prints `None` instead of failing. This flags
+//! every `$name` whose `name` is never defined anywhere in the buffer.
+//!
+//! Only the explicit `$name` form is checked. Bare names can't be told apart
+//! from labels, `file`, method letters and the compact `Gname` style without a
+//! real parser, and false positives are the annoying kind.
 //!
 //! The scan is deliberately flat (a name defined in *any* scope counts as
 //! defined): Vulpin functions see globals via `vextend`, and a flat set keeps
@@ -13,8 +17,8 @@ use std::collections::HashSet;
 
 use crate::buffer::{Buffer, Position};
 
-/// Modules usable without a `U` import (`Vulpin/src/vm.c` `builtin_call`).
-const BUILTIN_MODULES: &[&str] = &["math", "os", "random"];
+/// Modules usable without a `U` import (`Vulpin/src/vm.c` `bc`).
+const BUILTIN_MODULES: &[&str] = &["math", "random"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -70,17 +74,40 @@ pub fn check(buf: &Buffer) -> Vec<Diagnostic> {
     out
 }
 
-/// Names this line brings into scope.
-fn collect_definitions(line: &str, out: &mut HashSet<String>) {
+/// Names this line brings into scope (also used by autocomplete).
+pub(crate) fn collect_definitions(line: &str, out: &mut HashSet<String>) {
     let trimmed = line.trim_start();
     let mut cs = trimmed.chars();
     let Some(cmd) = cs.next() else { return };
     let rest = cs.as_str().trim();
 
+    // Comprehension variables anywhere on the line: `[x*2 | x <- list]`.
+    let mut search = line;
+    while let Some(pos) = search.find("<-") {
+        let before = search[..pos].trim_end();
+        let start = before
+            .rfind(|c: char| !is_ident_char(c))
+            .map_or(0, |i| i + 1);
+        if let Some(name) = first_ident(&before[start..]) {
+            out.insert(name);
+        }
+        search = &search[pos + 2..];
+    }
+
     match cmd {
-        // `K name ...`, `O i start end`, `C err`
-        'K' | 'O' | 'C' => {
-            if let Some(name) = first_ident(rest) {
+        // `E i, v list` (enumerate) defines both; `E"msg"` raises, defines none
+        'E' => {
+            if let Some((i, v)) = crate::syntax::vulpin::enumerate_vars(rest) {
+                out.insert(i);
+                out.insert(v);
+            } else if let Some(name) = first_ident(rest) {
+                out.insert(name);
+            }
+        }
+        // `K name ...`, `O i start end`, `A"name"+n` (starts from 0), and
+        // `C err` / `C"err"`
+        'K' | 'O' | 'A' | 'C' => {
+            if let Some(name) = first_ident(rest.trim_start_matches(['"', '\'', '`'])) {
                 out.insert(name);
             }
         }
@@ -91,8 +118,9 @@ fn collect_definitions(line: &str, out: &mut HashSet<String>) {
                 out.insert(name);
             }
             if let Some(params) = it.next() {
+                // `!b` marks an optional parameter
                 for p in params.trim_end_matches(')').split(',') {
-                    if let Some(name) = first_ident(p) {
+                    if let Some(name) = first_ident(p.trim_start().trim_start_matches('!')) {
                         out.insert(name);
                     }
                 }
@@ -120,7 +148,10 @@ fn collect_definitions(line: &str, out: &mut HashSet<String>) {
                 )
                 .collect();
             let after = trimmed[name.len()..].trim_start();
-            if after.starts_with('=') && !after.starts_with("==") {
+            let compound = ["+=", "-=", "*=", "/=", "%="]
+                .iter()
+                .any(|op| after.starts_with(op));
+            if compound || (after.starts_with('=') && !after.starts_with("==")) {
                 out.insert(name);
             }
         }
@@ -201,6 +232,28 @@ G $add($total, $guess)";
         // `#` starts a comment; `$ghost` after it must not be flagged.
         let src = "x = 1\nG $x  # $ghost here\n";
         assert!(check(&Buffer::from_str(src)).is_empty());
+    }
+
+    #[test]
+    fn quoted_catch_optional_params_and_comprehensions_count() {
+        let src = "\
+T
+  G 1/0
+C\"err\"
+  G $err
+Y
+F f(a, !b)
+  R $b
+~
+n += 1
+G $n
+E m 5
+G $m
+E i, v [1]
+  G $i + $v
+&
+G [$x * 2 | x <- [1, 2]]";
+        assert!(check(&Buffer::from_str(src)).is_empty(), "{:?}", names(src));
     }
 
     #[test]

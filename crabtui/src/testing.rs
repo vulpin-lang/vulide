@@ -313,13 +313,13 @@ mod tests {
             .set_cursor(Position { line: 3, col: 0 }, false);
         h.draw();
 
-        // function name completes with its signature shown
-        h.type_str("G $sh");
+        // function name completes (bare, passive: Tab only) with its signature
+        h.type_str("G sh");
         assert!(h.app.completion.is_some());
         assert!(h.contains("shout"), "fn candidate:\n{}", h.screen());
         assert!(h.contains("fn(msg)"), "signature shown:\n{}", h.screen());
-        h.key(KeyCode::Enter);
-        assert_eq!(h.app.buf().line_text(3), "G $shout");
+        h.key(KeyCode::Tab);
+        assert_eq!(h.app.buf().line_text(3), "G shout");
 
         // `.` offers the string methods
         h.type_str(".");
@@ -328,7 +328,20 @@ mod tests {
         h.type_str("L");
         assert_eq!(h.app.completion.as_ref().unwrap().items.len(), 1);
         h.key(KeyCode::Enter);
-        assert_eq!(h.app.buf().line_text(3), "G $shout.L");
+        assert_eq!(h.app.buf().line_text(3), "G shout.L");
+    }
+
+    #[test]
+    fn enter_ignores_a_bare_word_suggestion() {
+        let mut h = Harness::with_text("name = 1\n", 40, 8);
+        h.app
+            .buf_mut()
+            .set_cursor(Position { line: 1, col: 0 }, false);
+        h.type_str("G na");
+        assert!(h.app.completion.as_ref().is_some_and(|c| c.passive));
+        h.key(KeyCode::Enter);
+        assert_eq!(h.app.buf().line_text(1), "G na", "Enter must not accept");
+        assert_eq!(h.app.buf().cursor().line, 2, "Enter made a newline");
     }
 
     #[test]
@@ -336,11 +349,7 @@ mod tests {
         let mut h = Harness::with_text("", 50, 10);
         h.type_str("K");
         assert!(h.app.completion.is_some(), "hint on a lone command letter");
-        assert!(
-            h.contains("read a line of input"),
-            "screen:\n{}",
-            h.screen()
-        );
+        assert!(h.contains("input   K name"), "screen:\n{}", h.screen());
         // adding an expression ends the hint
         h.type_str(" $x");
         assert!(h.app.completion.is_none());
@@ -1274,6 +1283,26 @@ mod tests {
         assert!(h.contains("readme.txt"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_string_spanning_lines_is_coloured_on_every_line() {
+        // the multi-line triple-backtick print from the bug report
+        let mut h = Harness::with_text("G```hello\nhello\n```\nG 1\n", 40, 8);
+        h.draw();
+        let col = |h: &Harness, row: u16, needle: &str| {
+            let line = h.line(row);
+            let byte = line.find(needle).expect("text on screen");
+            line[..byte].chars().count() as u16
+        };
+        let hello = col(&h, 1, "hello");
+        assert_eq!(h.cell(hello, 1).fg, h.app.theme.string, "\n{}", h.screen());
+        let close = col(&h, 2, "```");
+        assert_eq!(h.cell(close, 2).fg, h.app.theme.string);
+        // after the closing quotes, colouring is back to normal
+        let g = col(&h, 3, "G 1");
+        assert_eq!(h.cell(g, 3).fg, h.app.theme.command);
+        assert_eq!(h.cell(g + 2, 3).fg, h.app.theme.number);
     }
 
     #[test]
