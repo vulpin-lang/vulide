@@ -24,8 +24,9 @@ pub struct Position {
     pub col: usize,
 }
 
-/// Vulpin block openers — a newline after one of these adds an indent level.
-/// Matches `BLOCK_OPENERS` in the Python IDE.
+/// Leading chars that add an indent level in non-Vulpin buffers (the Python
+/// IDE's `BLOCK_OPENERS`). Vulpin buffers use [`crate::syntax::vulpin::opens_indent`],
+/// which tells e.g. `T` (try) from `T fn list` (filter).
 const BLOCK_OPENERS: &[char] = &['?', '@', 'O', 'F', 'T', 'W', 'V', 'N', ':'];
 
 pub struct Buffer {
@@ -367,12 +368,13 @@ impl Buffer {
         let current = self.line_text(self.cursor.line);
         let (indent, extra): (String, usize) = if self.auto_indent {
             let indent = current.chars().take_while(|c| c.is_whitespace()).collect();
-            let first_non_ws = current.trim_start().chars().next();
-            let extra = if first_non_ws.is_some_and(|c| BLOCK_OPENERS.contains(&c)) {
-                self.tab_width
+            let opens = if self.language == Language::Vulpin {
+                crate::syntax::vulpin::opens_indent(&current)
             } else {
-                0
+                let first_non_ws = current.trim_start().chars().next();
+                first_non_ws.is_some_and(|c| BLOCK_OPENERS.contains(&c))
             };
+            let extra = if opens { self.tab_width } else { 0 };
             (indent, extra)
         } else {
             (String::new(), 0)
@@ -803,6 +805,21 @@ mod tests {
         // 4 existing indent + 4 for the `?` opener
         assert_eq!(b.line_text(1), "        ");
         assert_eq!(b.cursor(), Position { line: 1, col: 8 });
+    }
+
+    #[test]
+    fn newline_autoindent_follows_vulpin_statement_kind() {
+        let indent_after = |line: &str| {
+            let mut b = Buffer::from_str(line);
+            b.move_end(false);
+            b.newline();
+            b.line_text(1)
+        };
+        assert_eq!(indent_after("C\"err\""), "    ");
+        assert_eq!(indent_after("T"), "    ");
+        assert_eq!(indent_after("T odd [1,2,3]"), "");
+        assert_eq!(indent_after("W file \"o.txt\" \"hi\""), "");
+        assert_eq!(indent_after("?a==5;G\"yes\";"), "");
     }
 
     #[test]

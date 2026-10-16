@@ -96,6 +96,14 @@ pub fn render(
     let bracket_match = buf.matching_bracket();
     let cursor_bracket = bracket_pair_at(buf, cursor);
     let language = buf.language();
+    // A string still open where the first visible line starts (Vulpin strings
+    // can span lines), carried down through the lines above the viewport.
+    let mut open: crate::syntax::vulpin::Open = None;
+    if language == Language::Vulpin {
+        for l in 0..buf.scroll_top.min(total) {
+            open = language.tokenize_line_from(&buf.line_text(l), open).1;
+        }
+    }
 
     let mut lines: Vec<Line> = Vec::with_capacity(text_h);
     let mut cursor_screen = None;
@@ -110,6 +118,8 @@ pub fn render(
             continue;
         }
         let text = buf.line_text(ln);
+        let (tokens, open_after) = language.tokenize_line_from(&text, open);
+        open = open_after;
         let nchars = text.chars().count();
         let starts = if wrap {
             wrap_starts(&text, text_w)
@@ -174,7 +184,7 @@ pub fn render(
                 search_current,
                 diagnostics,
                 theme,
-                language,
+                &tokens,
             ));
             lines.push(Line::from(spans));
 
@@ -294,14 +304,13 @@ fn styled_text(
     search_current: usize,
     diagnostics: &[(Position, Position)],
     theme: &Theme,
-    language: Language,
+    tokens: &[crate::syntax::Token],
 ) -> Vec<Span<'static>> {
     let base_bg = if is_current {
         theme.current_line
     } else {
         theme.bg
     };
-    let tokens = language.tokenize_line(text);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut group = String::new();

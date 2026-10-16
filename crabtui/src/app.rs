@@ -2157,6 +2157,11 @@ impl App {
         let Some(c) = &mut self.completion else {
             return false;
         };
+        // A passive (bare-word) popup only takes Tab; everything else edits.
+        if c.passive && !matches!(key.code, KeyCode::Tab | KeyCode::Esc) {
+            self.completion = None;
+            return false;
+        }
         match key.code {
             KeyCode::Up => c.move_up(),
             KeyCode::Down => c.move_down(),

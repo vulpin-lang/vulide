@@ -45,19 +45,24 @@ Requires a recent stable Rust (edition 2024). The Vulpin interpreter is found vi
 ## Features
 
 - **Editor** — rope-backed buffer, grapheme/display-column movement, undo/redo
-  with coalescing, selection, auto-indent on Vulpin block openers, bracket
-  matching and auto-close.
+  with coalescing, selection, auto-indent on Vulpin block openers (it knows `T`
+  try from `T fn list` filter, `W` switch from `W file` write, and that an inline
+  `?a;b;` if is already closed), bracket matching and auto-close.
 - **Syntax highlighting** — a hand-written Vulpin scanner matching
-  `Vulpin/src/parser.c` (includes `O` FOR, the real operator set, no string
-  escapes), plus keyword/string/comment highlighting for Python, Rust, C, Shell,
+  `Vulpin/src/parser.c`: every statement letter, bare and `$` variables,
+  function calls and builtins, `"` `'` `` ` `` and `'''` strings with `\`
+  escapes, `r"…"` raw and `$"…"` format strings, `in`/`true`/`false`, and
+  compact forms like `Gname`. Plus keyword/string/comment highlighting for Python, Rust, C, Shell,
   TOML, JSON, and Markdown, picked by extension. Unknown extensions render plain.
   Current grammar shows in the status bar. The Vulpin outline, lint, and
   autocomplete switch off in non-Vulpin buffers.
 - **Themes** — a 40-role theme system, 6 bundled themes, live-preview picker.
   Config at `~/.config/vulide/config.toml`.
-- **Autocomplete** — pops as you type: `$name` → variables and user functions
-  (with an `fn(a, b)` signature), `.` → the string methods, a lone command char →
-  a one-line reminder.
+- **Autocomplete** — pops as you type: `$name` → variables, `.` → the string
+  methods (or `math.` / `random.` members), a lone command char → a one-line
+  reminder, and a bare word → user functions (with an `fn(a, b)` signature),
+  variables and builtins. Bare-word suggestions are passive: only `Tab`
+  accepts, so `Enter` still makes a newline.
 - **Find / replace** — incremental, highlights every match, wraps, one-undo-step
   replace-all. Docks below the editor.
 - **File tree** (`F2`) — a lazily-expanded directory view in the left column,
@@ -69,7 +74,9 @@ Requires a recent stable Rust (edition 2024). The Vulpin interpreter is found vi
   blocks, labels, jumps, returns, indented by nesting; tolerant of half-typed
   code. `Enter` or click jumps the editor there.
 - **Undefined-variable lint** — Vulpin reads an undefined `$name` as `None`
-  *silently*. Every such reference is underlined and counted in the status bar.
+  *silently*. Definitions count from assignments (incl. `+=`), `K`, `O`, `E`,
+  `A`, `C"err"`, function parameters (incl. `!optional`) and `x <-`
+  comprehension variables. Every such reference is underlined and counted in the status bar.
 - **Tabs**, a **command palette**, and a **run console** (`F5`) that streams
   stdout/stderr with line-buffered stdin.
 - **Mouse layer** — all optional: run button, draggable splitter, tab

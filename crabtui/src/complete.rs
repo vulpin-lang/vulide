@@ -5,11 +5,17 @@
 //! selected row has nothing left to insert (a command reminder, a fully-typed
 //! method) Enter still makes a newline.
 //!
-//! Four contexts, tried in this order:
-//!   1. **`$name`** — variables (every `$ref` + leading `name =` target) and
-//!      user functions (`F name(...)`), prefix-filtered.
-//!   2. **`.`** — the string methods `.U .L .S .T .C`.
+//! Contexts, tried in this order:
+//!   1. **`$name`** — variables (every `$ref`, assignment target, loop/input/
+//!      catch variable). Functions aren't offered here: `$f(…)` calls the
+//!      function *named by the string in* `f`, so `$greet(…)` is a runtime error.
+//!   2. **`.`** — `math.` / `random.` members, else the string methods
+//!      `.U .L .S .T .C .R .SP .J .F`.
 //!   3. one leading command letter — a one-line reminder of what it does.
+//!   4. **a bare word** (2+ chars, outside strings/comments) — user functions,
+//!      variables and builtins. This one is *passive*: only Tab accepts, and
+//!      Enter / Up / Down keep their editing meaning, since it pops up while
+//!      typing ordinary code.
 //!
 //! `Position::col` is a char index, so every scan walks the line as `Vec<char>`
 //! (a byte scan would misalign after a non-ASCII glyph). The structural scans
@@ -23,42 +29,52 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::buffer::Buffer;
+use crate::syntax::TokenKind;
+use crate::syntax::vulpin::{self, BUILTINS, MODULE_MEMBERS};
 use crate::theme::Theme;
 
 const MAX_VISIBLE: usize = 8;
 
-/// Vulpin's string methods (`Vulpin/src/vm.c` `strMethod`).
+/// Vulpin's string methods (`isStrMeth` in `Vulpin/src/parser.c`, `strMethod`
+/// in `vm.c`).
 const STR_METHODS: &[(&str, &str)] = &[
     ("U", "UPPERCASE"),
     ("L", "lowercase"),
     ("S", "strip whitespace"),
     ("T", "Title Case Each Word"),
     ("C", "Capitalise first letter"),
+    ("R", "R(old, new) — replace"),
+    ("SP", "SP(sep) — split into a List"),
+    ("J", "J(list) — join list with this string"),
+    ("F", "F(sub) — index of sub"),
 ];
 
 /// Leading statement chars and what they do (`Vulpin/src/parser.c`
-/// `parseStatement`). Shown as a one-line reminder when you type one.
+/// `parseStmtAt`). Shown as a one-line reminder when you type one.
 const COMMANDS: &[(&str, &str)] = &[
     ("G", "print, with a newline"),
     ("P", "print, no newline"),
-    ("K", "read a line of input"),
-    ("Q", "quit the program"),
-    ("X", "raise an error"),
-    ("E", "evaluate / assign a variable"),
-    ("A", "in-place arithmetic on a var"),
-    ("S", "string find & replace"),
+    ("K", "input   K name \"prompt\" [\"I\"|\"F\"]"),
+    ("Q", "quit   [exit code]"),
+    ("X", "run a shell command  (E\"msg\" raises an error)"),
+    ("!", "run a shell command"),
+    ("E", "E name value · E\"msg\" raises · E i, v list loops"),
+    ("A", "in-place arithmetic   A\"x\"+5"),
+    ("S", "string replace   S\"var\"\"old\"\"new\""),
     ("D", "delay seconds  (D \"x\" deletes x)"),
+    ("I", "inspect — print type and value"),
+    ("M", "map   M fn list"),
     ("U", "import a module"),
-    ("F", "define a function"),
-    ("R", "return a value from a function"),
+    ("F", "define a function   F name(a, !optional)"),
+    ("R", "return a value   (R file \"p\" reads a file)"),
     ("L", "label — a jump target"),
     ("J", "jump to a label"),
-    ("W", "switch on a value"),
+    ("W", "switch on a value   (W file \"p\" \"text\" writes)"),
     ("V", "case value"),
     ("N", "default case"),
     ("Z", "end switch"),
-    ("T", "try"),
-    ("C", "catch  [name]"),
+    ("T", "try   (T fn list filters)"),
+    ("C", "catch  [name]  — holds the error message"),
     ("Y", "end try"),
     ("O", "for   i  start end [step]"),
     ("?", "if  (condition)"),
@@ -95,6 +111,8 @@ pub struct Completion {
     pub prefix: String,
     pub items: Vec<Candidate>,
     pub selected: usize,
+    /// Only Tab accepts; Enter / Up / Down go to the editor (bare-word context).
+    pub passive: bool,
 }
 
 impl Completion {
@@ -107,6 +125,7 @@ impl Completion {
         detect_dollar(buffer, &chars, col)
             .or_else(|| detect_dot(&chars, col))
             .or_else(|| detect_command(&chars, col))
+            .or_else(|| detect_word(buffer, &chars, col))
     }
 
     pub fn current(&self) -> &Candidate {
@@ -140,19 +159,73 @@ fn detect_dollar(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completi
     }
     let prefix: String = chars[start..col].iter().collect();
 
+    let (vars, funcs) = scan_buffer(buffer);
+
+    let mut items: Vec<Candidate> = Vec::new();
+    for v in &vars {
+        if v.starts_with(&prefix) && *v != prefix && !funcs.iter().any(|(n, _)| n == v) {
+            items.push(Candidate::new(v.clone(), "var"));
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(Completion {
+        anchor_back: (col - (start - 1)) as u16, // include the `$`
+        prefix,
+        items,
+        selected: 0,
+        passive: false,
+    })
+}
+
+/// Every variable and user function (`F name(...)`) in the buffer, sorted.
+fn scan_buffer(buffer: &Buffer) -> (Vec<String>, Vec<(String, Vec<String>)>) {
     let mut vars: Vec<String> = Vec::new();
     let mut funcs: Vec<(String, Vec<String>)> = Vec::new();
+    let mut defined = std::collections::HashSet::new();
     for i in 0..buffer.line_count() {
         let line = buffer.line_text(i);
         collect_names(&line, &mut vars);
+        crate::lint::collect_definitions(&line, &mut defined);
         if let Some(f) = parse_function(&line) {
             funcs.push(f);
         }
     }
+    vars.extend(defined);
     vars.sort();
     vars.dedup();
     funcs.sort();
     funcs.dedup();
+    (vars, funcs)
+}
+
+/// A bare identifier being typed — functions, variables, builtins.
+fn detect_word(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completion> {
+    let mut start = col;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    // Compact `Gname` / `Kname`: the leading command letter isn't part of it.
+    let first = chars.iter().position(|c| !c.is_whitespace())?;
+    if start == first && col > start && chars[start].is_ascii_uppercase() {
+        start += 1;
+    }
+    if col < start + 2 || chars[start].is_ascii_digit() {
+        return None;
+    }
+    if start > 0 && matches!(chars[start - 1], '$' | '.') {
+        return None;
+    }
+    // Not inside a string or comment.
+    let line: String = chars.iter().collect();
+    if vulpin::tokenize(&line).iter().any(|t| {
+        matches!(t.kind, TokenKind::String | TokenKind::Comment) && t.start < col && col <= t.end
+    }) {
+        return None;
+    }
+    let prefix: String = chars[start..col].iter().collect();
+    let (vars, funcs) = scan_buffer(buffer);
 
     let mut items: Vec<Candidate> = Vec::new();
     for (name, params) in &funcs {
@@ -168,18 +241,24 @@ fn detect_dollar(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completi
             items.push(Candidate::new(v.clone(), "var"));
         }
     }
+    for (b, detail) in BUILTINS {
+        if b.starts_with(&prefix) && *b != prefix && !items.iter().any(|c| c.text == *b) {
+            items.push(Candidate::new(*b, *detail));
+        }
+    }
     if items.is_empty() {
         return None;
     }
     Some(Completion {
-        anchor_back: (col - (start - 1)) as u16, // include the `$`
+        anchor_back: (col - start) as u16,
         prefix,
         items,
         selected: 0,
+        passive: true,
     })
 }
 
-/// `.` followed by 0–1 letters — the string methods.
+/// `.` — a built-in module's members, or the string methods.
 fn detect_dot(chars: &[char], col: usize) -> Option<Completion> {
     let mut start = col;
     while start > 0 && chars[start - 1].is_ascii_alphabetic() {
@@ -189,14 +268,28 @@ fn detect_dot(chars: &[char], col: usize) -> Option<Completion> {
         return None;
     }
     let prefix: String = chars[start..col].iter().collect();
-    if prefix.chars().count() > 1 {
-        return None; // `.ident` module member, not a method
+
+    // The word before the dot: `math.` / `random.` list their members.
+    let mut owner_start = start - 1;
+    while owner_start > 0 && is_word_char(chars[owner_start - 1]) {
+        owner_start -= 1;
     }
-    let items: Vec<Candidate> = STR_METHODS
-        .iter()
-        .filter(|(k, _)| k.starts_with(&prefix))
-        .map(|(k, d)| Candidate::new(*k, *d))
-        .collect();
+    let owner: String = chars[owner_start..start - 1].iter().collect();
+    let items: Vec<Candidate> =
+        if let Some((_, members)) = MODULE_MEMBERS.iter().find(|(m, _)| *m == owner) {
+            members
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix) && *k != prefix)
+                .map(|(k, d)| Candidate::new(*k, *d))
+                .collect()
+        } else {
+            // Method names are all caps; anything longer is a module member.
+            STR_METHODS
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(k, d)| Candidate::new(*k, *d))
+                .collect()
+        };
     if items.is_empty() {
         return None;
     }
@@ -205,6 +298,7 @@ fn detect_dot(chars: &[char], col: usize) -> Option<Completion> {
         prefix,
         items,
         selected: 0,
+        passive: false,
     })
 }
 
@@ -225,6 +319,7 @@ fn detect_command(chars: &[char], col: usize) -> Option<Completion> {
         prefix: lead.to_string(),
         items: vec![Candidate::new(*key, *desc)],
         selected: 0,
+        passive: false,
     })
 }
 
@@ -308,7 +403,8 @@ fn parse_function(line: &str) -> Option<(String, Vec<String>)> {
     if bytes.get(i) == Some(&b'(') {
         i += 1;
         loop {
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',') {
+            // `!` marks an optional parameter
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',' || bytes[i] == b'!') {
                 i += 1;
             }
             if i >= bytes.len() || !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
@@ -428,12 +524,23 @@ mod tests {
     }
 
     #[test]
-    fn suggests_functions_with_signature() {
-        let mut b = Buffer::from_str("F greet(name, punct)\n  G $name\n~\nG $gr");
-        b.set_cursor(Position { line: 3, col: 5 }, false);
+    fn suggests_functions_with_signature_as_bare_words() {
+        let mut b = Buffer::from_str("F greet(name, !punct)\n  G $name\n~\nG gr");
+        b.set_cursor(Position { line: 3, col: 4 }, false);
         let c = Completion::detect(&b).unwrap();
         assert_eq!(texts(&c), vec!["greet"]);
         assert_eq!(c.current().detail, "fn(name, punct)");
+        assert!(c.passive);
+    }
+
+    #[test]
+    fn dollar_offers_variables_not_functions() {
+        // `$greet(…)` is a runtime error in Vulpin, so `$` never offers it.
+        let mut b = Buffer::from_str("F greet(n)\n~\ngreeting = 1\nG $gr");
+        b.set_cursor(Position { line: 3, col: 5 }, false);
+        let c = Completion::detect(&b).unwrap();
+        assert_eq!(texts(&c), vec!["greeting"]);
+        assert!(!c.passive);
     }
 
     #[test]
@@ -441,13 +548,27 @@ mod tests {
         let mut b = Buffer::from_str("x = $name.");
         b.set_cursor(Position { line: 0, col: 10 }, false);
         let c = Completion::detect(&b).unwrap();
-        assert_eq!(texts(&c), vec!["U", "L", "S", "T", "C"]);
+        assert_eq!(
+            texts(&c),
+            vec!["U", "L", "S", "T", "C", "R", "SP", "J", "F"]
+        );
         // narrow to `.S`
         let mut b = Buffer::from_str("x = $name.S");
         b.set_cursor(Position { line: 0, col: 11 }, false);
         let c = Completion::detect(&b).unwrap();
-        assert_eq!(texts(&c), vec!["S"]);
+        assert_eq!(texts(&c), vec!["S", "SP"]);
         assert_eq!(c.completion_tail(), "");
+    }
+
+    #[test]
+    fn module_members_after_math_dot() {
+        let mut b = Buffer::from_str("G math.s");
+        b.set_cursor(Position { line: 0, col: 8 }, false);
+        let c = Completion::detect(&b).unwrap();
+        assert_eq!(texts(&c), vec!["sqrt"]);
+        let mut b = Buffer::from_str("G random.");
+        b.set_cursor(Position { line: 0, col: 9 }, false);
+        assert_eq!(texts(&Completion::detect(&b).unwrap()), vec!["randint"]);
     }
 
     #[test]
@@ -483,10 +604,35 @@ mod tests {
     }
 
     #[test]
-    fn none_outside_dollar_context() {
+    fn bare_words_complete_passively() {
+        // Was `none_outside_dollar_context`: bare names are the normal style
+        // now, so they complete too — passively (Tab only).
         let mut b = Buffer::from_str("name = 1\nGG na");
         b.set_cursor(Position { line: 1, col: 5 }, false);
-        assert!(Completion::detect(&b).is_none());
+        let c = Completion::detect(&b).unwrap();
+        assert_eq!(texts(&c), vec!["name"]);
+        assert!(c.passive);
+        // compact `Gna` — the command letter isn't part of the word
+        let mut b = Buffer::from_str("name = 1\nGna");
+        b.set_cursor(Position { line: 1, col: 3 }, false);
+        assert_eq!(texts(&Completion::detect(&b).unwrap()), vec!["name"]);
+        // builtins too
+        let mut b = Buffer::from_str("G le");
+        b.set_cursor(Position { line: 0, col: 4 }, false);
+        assert_eq!(texts(&Completion::detect(&b).unwrap()), vec!["len"]);
+    }
+
+    #[test]
+    fn no_bare_word_completion_in_strings_comments_or_one_char() {
+        for (src, col) in [
+            ("name = 1\nG \"na", 5),
+            ("name = 1\nG 1 # na", 8),
+            ("name = 1\nG n", 3),
+        ] {
+            let mut b = Buffer::from_str(src);
+            b.set_cursor(Position { line: 1, col }, false);
+            assert!(Completion::detect(&b).is_none(), "{src:?}");
+        }
     }
 
     #[test]

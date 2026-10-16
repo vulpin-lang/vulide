@@ -10,12 +10,16 @@
 //! saturating counter would flatten the rest of the outline after the first
 //! stray `~`. A closer that matches nothing on the stack is simply ignored.
 //!
-//! Block grammar (`Vulpin/src/parser.c` `parseStatement`):
-//!   openers  F(func)  ?(if)  @(while)  O(for)  W(switch)  T(try)
-//!   closers  ~(endfn) ;(endif) &(endwhile/endfor) Z(endsw) Y(endtry)
-//!   in-block :(else)  V(case)  N(default)  C(catch)   — shown one level in
+//! Block grammar (`Vulpin/src/parser.c` `parseStmtAt`), classified by
+//! [`vulpin::lead`] so the outline and auto-indent agree:
+//!   openers  F(func)  ?(if)  @(while)  O(for)  E i, v(enumerate)  W(switch)  T(try)
+//!   closers  ~(endfn) ;(endif) &(endwhile/endfor/enumerate) Z(endsw) Y(endtry)
+//!   in-block :(else)  :?(elif)  V(case)  N(default)  C(catch) — shown one level in
+//! `T fn list` (filter), `W file …` (write), `Z a b` (zip) and an inline
+//! `?cond;stmt;` are not blocks.
 
 use crate::buffer::Buffer;
+use crate::syntax::vulpin::{self, Lead};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -76,25 +80,34 @@ pub fn outline(buf: &Buffer) -> Vec<Item> {
         let Some(cmd) = cs.next() else { continue };
         let rest = cs.as_str().trim();
 
-        match cmd {
+        match (vulpin::lead(trimmed), cmd) {
             // ---- openers ----
-            'F' => {
+            (Lead::Open(_), 'F') => {
                 items.push(mk(line, stack.len(), Kind::Function, function_label(rest)));
                 stack.push(Kind::Function);
             }
-            '?' => {
+            (Lead::Open(_), '?') => {
                 items.push(mk(line, stack.len(), Kind::If, prefixed("if", rest)));
                 stack.push(Kind::If);
             }
-            '@' => {
+            (Lead::Open(_), '@') => {
                 items.push(mk(line, stack.len(), Kind::While, prefixed("while", rest)));
                 stack.push(Kind::While);
             }
-            'O' => {
+            (Lead::Open(_), 'O') => {
                 items.push(mk(line, stack.len(), Kind::For, prefixed("for", rest)));
                 stack.push(Kind::For);
             }
-            'W' => {
+            (Lead::Open(_), 'E') => {
+                items.push(mk(
+                    line,
+                    stack.len(),
+                    Kind::For,
+                    prefixed("enumerate", rest),
+                ));
+                stack.push(Kind::For);
+            }
+            (Lead::Open(_), 'W') => {
                 items.push(mk(
                     line,
                     stack.len(),
@@ -103,38 +116,44 @@ pub fn outline(buf: &Buffer) -> Vec<Item> {
                 ));
                 stack.push(Kind::Switch);
             }
-            'T' => {
+            (Lead::Open(_), 'T') => {
                 items.push(mk(line, stack.len(), Kind::Try, "try".to_string()));
                 stack.push(Kind::Try);
             }
 
             // ---- closers (pop the nearest matching opener, drop danglers) ----
-            '~' => pop_to(&mut stack, &[Kind::Function]),
-            ';' => pop_to(&mut stack, &[Kind::If]),
-            '&' => pop_to(&mut stack, &[Kind::While, Kind::For]),
-            'Z' => pop_to(&mut stack, &[Kind::Switch]),
-            'Y' => pop_to(&mut stack, &[Kind::Try]),
+            (Lead::Close(_), '~') => pop_to(&mut stack, &[Kind::Function]),
+            (Lead::Close(_), ';') => pop_to(&mut stack, &[Kind::If]),
+            (Lead::Close(_), '&') => pop_to(&mut stack, &[Kind::While, Kind::For]),
+            (Lead::Close(_), 'Z') => pop_to(&mut stack, &[Kind::Switch]),
+            (Lead::Close(_), 'Y') => pop_to(&mut stack, &[Kind::Try]),
 
             // ---- in-block markers (one level inside their opener) ----
-            ':' => items.push(mk(
+            (Lead::Middle('e'), _) => items.push(mk(
+                line,
+                depth_inside(&stack),
+                Kind::Else,
+                prefixed("else if", rest.trim_start_matches('?').trim()),
+            )),
+            (Lead::Middle(_), ':') => items.push(mk(
                 line,
                 depth_inside(&stack),
                 Kind::Else,
                 "else".to_string(),
             )),
-            'V' => items.push(mk(
+            (Lead::Middle(_), 'V') => items.push(mk(
                 line,
                 depth_inside(&stack),
                 Kind::Case,
                 prefixed("case", rest),
             )),
-            'N' => items.push(mk(
+            (Lead::Middle(_), 'N') => items.push(mk(
                 line,
                 depth_inside(&stack),
                 Kind::Case,
                 "default".to_string(),
             )),
-            'C' => items.push(mk(
+            (Lead::Middle(_), 'C') => items.push(mk(
                 line,
                 depth_inside(&stack),
                 Kind::Catch,
@@ -146,16 +165,16 @@ pub fn outline(buf: &Buffer) -> Vec<Item> {
             )),
 
             // ---- leaves ----
-            'L' if !rest.is_empty() => {
+            (_, 'L') if !rest.is_empty() => {
                 items.push(mk(line, stack.len(), Kind::Label, rest.to_string()))
             }
-            'J' if !rest.is_empty() => items.push(mk(
+            (_, 'J') if !rest.is_empty() => items.push(mk(
                 line,
                 stack.len(),
                 Kind::Jump,
                 format!("→ {}", clip(rest, 24)),
             )),
-            'R' => items.push(mk(
+            (_, 'R') if !is_file_form(rest) => items.push(mk(
                 line,
                 stack.len(),
                 Kind::Return,
@@ -169,6 +188,12 @@ pub fn outline(buf: &Buffer) -> Vec<Item> {
         }
     }
     items
+}
+
+/// `R file "path"` reads a file — not a return.
+fn is_file_form(rest: &str) -> bool {
+    rest.strip_prefix("file")
+        .is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
 }
 
 fn mk(line: usize, depth: usize, kind: Kind, label: String) -> Item {
@@ -258,6 +283,40 @@ mod tests {
 
     fn kinds(items: &[Item]) -> Vec<(usize, Kind)> {
         items.iter().map(|i| (i.depth, i.kind)).collect()
+    }
+
+    #[test]
+    fn filter_zip_file_and_inline_if_are_not_blocks() {
+        let src = "\
+T odd [1,2,3]
+W file \"o.txt\" \"hi\"
+R file \"o.txt\"
+?a==5;G\"yes\";
+? x > 1
+  G 1
+:? x > 0
+  G 2
+;
+Z a b
+E i, v [1, 2]
+  G v
+&
+R filename
+G \"top\"";
+        let items = outline(&Buffer::from_str(src));
+        let got: Vec<(usize, usize, Kind, &str)> = items
+            .iter()
+            .map(|i| (i.line, i.depth, i.kind, i.label.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (4, 0, Kind::If, "if x > 1"),
+                (6, 0, Kind::Else, "else if x > 0"),
+                (10, 0, Kind::For, "enumerate i, v [1, 2]"),
+                (13, 0, Kind::Return, "return filename"),
+            ]
+        );
     }
 
     #[test]

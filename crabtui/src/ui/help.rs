@@ -52,7 +52,7 @@ pub const CARD: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Backspace / Delete", "delete the word behind / ahead"),
             (
                 "autocomplete",
-                "$vars · functions · .U/.L/.S/.T/.C · command hints — Enter/Tab accepts",
+                "$vars · .U .L .S .T .C .R .SP .J .F · math./random. · command hints — Enter/Tab accepts; names as you type — Tab accepts",
             ),
         ],
     ),
@@ -60,15 +60,25 @@ pub const CARD: &[(&str, &[(&str, &str)])] = &[
         "Vulpin commands",
         &[
             ("G / P", "print — with / without a newline"),
-            ("K  Q  X", "read input · quit · raise error"),
-            ("? : ;", "if · else · end if"),
+            ("K  Q", "read input · quit [exit code]"),
+            ("X  !", "run a shell command"),
+            ("? :? : ;", "if · else if · else · end if  (a;b; inline)"),
             ("@ &   O", "while · end while   ·   for i start end [step]"),
             ("F ~ R", "function · end function · return"),
             ("L  J", "label · jump to label"),
             ("W V N Z", "switch · case · default · end switch"),
             ("T C Y", "try · catch · end try"),
-            ("E  A  S", "assign · in-place arithmetic · string replace"),
-            ("U   $x", "import module   ·   $x dereferences a variable"),
+            (
+                "E",
+                "E name value · E\"msg\" raise error · E i, v list … & enumerate",
+            ),
+            ("A  S", "in-place arithmetic · string replace"),
+            ("I  M", "inspect a value · map a function over a list"),
+            ("U   $x", "import module   ·   $x reads variable x"),
+            (
+                "\\n \\t  r\"…\"  $\"{x}\"",
+                "string escapes · raw string · format string",
+            ),
         ],
     ),
     (
