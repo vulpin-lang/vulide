@@ -96,11 +96,9 @@ impl ProjectsPicker {
     }
 
     fn row_at(&self, outer: Rect, row: u16) -> Option<usize> {
-        let body_top = outer.y + 1;
-        if row < body_top {
-            return None;
-        }
-        let idx = (row - body_top) as usize;
+        let off = super::visible_row(outer, outer.y + 1, row, MAX_ROWS)?;
+        // Same window `render` draws: it scrolls to keep the selection in view.
+        let idx = self.selected.saturating_sub(MAX_ROWS - 1) + off;
         (idx < self.row_count()).then_some(idx)
     }
 

@@ -85,9 +85,11 @@ pub(crate) fn collect_definitions(line: &str, out: &mut HashSet<String>) {
     let mut search = line;
     while let Some(pos) = search.find("<-") {
         let before = search[..pos].trim_end();
+        // Past the whole separator char — it may be multi-byte (`é`, `→`).
         let start = before
-            .rfind(|c: char| !is_ident_char(c))
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rfind(|&(_, c)| !is_ident_char(c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
         if let Some(name) = first_ident(&before[start..]) {
             out.insert(name);
         }

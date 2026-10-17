@@ -154,12 +154,20 @@ fn detect_dollar(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completi
     while start > 0 && is_word_char(chars[start - 1]) {
         start -= 1;
     }
-    if start == 0 || chars[start - 1] != '$' {
+    if start == 0 || chars[start - 1] != '$' || in_string_or_comment(chars, col) {
         return None;
     }
     let prefix: String = chars[start..col].iter().collect();
 
     let (vars, funcs) = scan_buffer(buffer);
+    // `$i` is complete when `i` is a defined variable, even if `idx` exists
+    // too: then the popup only offers (Tab), and Enter stays a newline.
+    // Definitions, not `vars` — that also holds the `$i` being typed.
+    let mut defined = std::collections::HashSet::new();
+    for i in 0..buffer.line_count() {
+        crate::lint::collect_definitions(&buffer.line_text(i), &mut defined);
+    }
+    let complete = defined.contains(&prefix);
 
     let mut items: Vec<Candidate> = Vec::new();
     for v in &vars {
@@ -175,7 +183,7 @@ fn detect_dollar(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completi
         prefix,
         items,
         selected: 0,
-        passive: false,
+        passive: complete,
     })
 }
 
@@ -217,11 +225,7 @@ fn detect_word(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completion
     if start > 0 && matches!(chars[start - 1], '$' | '.') {
         return None;
     }
-    // Not inside a string or comment.
-    let line: String = chars.iter().collect();
-    if vulpin::tokenize(&line).iter().any(|t| {
-        matches!(t.kind, TokenKind::String | TokenKind::Comment) && t.start < col && col <= t.end
-    }) {
+    if in_string_or_comment(chars, col) {
         return None;
     }
     let prefix: String = chars[start..col].iter().collect();
@@ -259,12 +263,36 @@ fn detect_word(buffer: &Buffer, chars: &[char], col: usize) -> Option<Completion
 }
 
 /// `.` — a built-in module's members, or the string methods.
+/// Whether `col` is inside a string or comment on this line.
+fn in_string_or_comment(chars: &[char], col: usize) -> bool {
+    let line: String = chars.iter().collect();
+    vulpin::tokenize(&line).iter().any(|t| {
+        matches!(t.kind, TokenKind::String | TokenKind::Comment) && t.start < col && col <= t.end
+    })
+}
+
 fn detect_dot(chars: &[char], col: usize) -> Option<Completion> {
     let mut start = col;
     while start > 0 && chars[start - 1].is_ascii_alphabetic() {
         start -= 1;
     }
     if start == 0 || chars[start - 1] != '.' {
+        return None;
+    }
+    // A method needs something to call it on: a name, a string or a closing
+    // bracket — not the full stop ending a comment, nor `3.` in a number.
+    let dot = start - 1;
+    let owner = dot.checked_sub(1).map(|i| chars[i]);
+    if !owner.is_some_and(|c| is_word_char(c) || matches!(c, '"' | ')' | ']'))
+        || in_string_or_comment(chars, dot + 1)
+    {
+        return None;
+    }
+    let mut word = dot;
+    while word > 0 && is_word_char(chars[word - 1]) {
+        word -= 1;
+    }
+    if word < dot && chars[word..dot].iter().all(char::is_ascii_digit) {
         return None;
     }
     let prefix: String = chars[start..col].iter().collect();
@@ -442,8 +470,13 @@ pub fn render_popup(
         .max()
         .unwrap_or(0);
     // ` text  detail ` — one leading space, two between, one trailing.
-    let width = (text_w + detail_w + 4).clamp(8, 48) as u16;
-    let visible = c.items.len().min(MAX_VISIBLE) as u16;
+    // Never wider or taller than the editor; a rect past the frame's edge
+    // would make `Clear` index out of the buffer.
+    let width = ((text_w + detail_w + 4).clamp(8, 48) as u16).min(area.width);
+    let visible = (c.items.len().min(MAX_VISIBLE) as u16).min(area.height);
+    if width == 0 || visible == 0 {
+        return;
+    }
 
     let top = if c.selected as u16 >= visible {
         c.selected as u16 + 1 - visible
@@ -465,7 +498,8 @@ pub fn render_popup(
         y,
         width,
         height: visible,
-    };
+    }
+    .intersection(f.area());
     f.render_widget(Clear, rect);
 
     let rows: Vec<Line> = (top..top + visible)

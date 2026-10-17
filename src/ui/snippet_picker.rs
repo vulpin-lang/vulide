@@ -51,19 +51,22 @@ impl SnippetPicker {
         }
     }
 
-    /// Row-hit test against the name list — one border row sits above it.
-    fn row_at(&self, outer: Rect, row: u16) -> Option<usize> {
-        let body_top = outer.y + 1;
-        if row < body_top {
+    /// Row-hit test against the name list (not the preview beside it) — one
+    /// border row sits above it.
+    fn row_at(&self, outer: Rect, col: u16, row: u16) -> Option<usize> {
+        let list_x = outer.x + 1;
+        if col < list_x || col >= list_x + LIST_WIDTH {
             return None;
         }
-        let idx = (row - body_top) as usize;
+        let rows = list_rows(outer);
+        let off = super::visible_row(outer, outer.y + 1, row, rows)?;
+        let idx = list_top(self.selected, rows) + off;
         (idx < SNIPPETS.len()).then_some(idx)
     }
 
-    /// A left click at `row`: select and immediately insert, same as Enter.
-    pub fn click(&mut self, outer: Rect, row: u16) -> SnippetOutcome {
-        match self.row_at(outer, row) {
+    /// A left click at `(col, row)`: select and immediately insert, same as Enter.
+    pub fn click(&mut self, outer: Rect, col: u16, row: u16) -> SnippetOutcome {
+        match self.row_at(outer, col, row) {
             Some(idx) => {
                 self.selected = idx;
                 SnippetOutcome::Insert(SNIPPETS[idx].body)
@@ -79,11 +82,26 @@ impl SnippetPicker {
     }
 }
 
+/// Width of the name list; the preview takes the rest.
+const LIST_WIDTH: u16 = 20;
+
+/// Name rows that fit inside the box's borders.
+fn list_rows(outer: Rect) -> usize {
+    outer.height.saturating_sub(2) as usize
+}
+
+/// First name shown: scrolled just enough to keep the selection in view.
+fn list_top(selected: usize, rows: usize) -> usize {
+    selected.saturating_sub(rows.max(1) - 1)
+}
+
 /// Returns the outer rect it drew into (for click-away hit-testing).
 pub fn render(f: &mut Frame, p: &SnippetPicker, theme: &Theme, area: Rect) -> Rect {
+    // Tall enough for every snippet name when the terminal allows; it scrolls
+    // when it doesn't.
     let rect = centered_rect(
         72,
-        (SNIPPETS.len() as u16 + 4).clamp(10, 18).min(area.height),
+        (SNIPPETS.len() as u16 + 2).max(10).min(area.height),
         area,
     );
     f.render_widget(Clear, rect);
@@ -104,11 +122,15 @@ pub fn render(f: &mut Frame, p: &SnippetPicker, theme: &Theme, area: Rect) -> Re
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
-    let cols = Layout::horizontal([Constraint::Length(20), Constraint::Min(24)]).split(inner);
+    let cols =
+        Layout::horizontal([Constraint::Length(LIST_WIDTH), Constraint::Min(24)]).split(inner);
 
+    let rows = list_rows(rect);
     let list: Vec<Line> = SNIPPETS
         .iter()
         .enumerate()
+        .skip(list_top(p.selected, rows))
+        .take(rows)
         .map(|(i, s)| {
             let selected = i == p.selected;
             let style = if selected {

@@ -2341,4 +2341,152 @@ mod tests {
             "the lint picked up the edit"
         );
     }
+
+    // ---- regressions from the review of the UI modules ----
+
+    #[test]
+    fn lint_survives_non_ascii_before_an_arrow() {
+        // Used to slice inside `é` / `→` and panic mid-draw.
+        let b = Buffer::from_str("# résumé <- x\nG \"a → <- b\"\nv <- [1]");
+        let _ = crate::lint::check(&b);
+        let mut defined = std::collections::HashSet::new();
+        crate::lint::collect_definitions("[ä <- xs]", &mut defined);
+    }
+
+    #[test]
+    fn output_panel_on_a_tiny_terminal_does_not_panic() {
+        for height in 1..10 {
+            let mut h = Harness::new(40, height);
+            h.app.start_run_argv(vec!["true".into()]);
+            h.draw(); // `want.clamp(3, max)` panicked once max < 3
+        }
+    }
+
+    #[test]
+    fn completion_popup_fits_a_narrow_terminal() {
+        for width in [6, 10, 20] {
+            let mut h = Harness::with_text("", width, 8);
+            h.type_str("en"); // `enumerate` with a ~40-column detail
+            h.draw();
+        }
+    }
+
+    #[test]
+    fn find_in_files_skips_fifos() {
+        let dir = std::env::temp_dir().join(format!("vulide-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.vul"), "needle\n").unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(dir.join("pipe"))
+            .status()
+            .is_ok_and(|s| s.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::ui::project_search::run(
+                &root, "needle", false, false,
+            ));
+        });
+        let result = rx.recv_timeout(Duration::from_secs(5));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(made, "mkfifo failed");
+        let result = result.expect("find-in-files blocked on the FIFO");
+        assert_eq!(result.matches.len(), 1);
+    }
+
+    #[test]
+    fn no_method_popup_after_a_full_stop_or_a_number() {
+        for text in ["# load the config.", "x = 3.", "G \"a.\""] {
+            let mut b = Buffer::from_str(text);
+            b.set_cursor(
+                Position {
+                    line: 0,
+                    col: text.chars().count() - usize::from(text.ends_with('"')),
+                },
+                false,
+            );
+            assert!(
+                crate::complete::Completion::detect(&b).is_none(),
+                "popup after {text:?}"
+            );
+        }
+        let mut b = Buffer::from_str("x = $name.");
+        b.set_cursor(Position { line: 0, col: 10 }, false);
+        assert!(crate::complete::Completion::detect(&b).is_some());
+    }
+
+    #[test]
+    fn enter_after_a_complete_short_variable_is_a_newline() {
+        let mut h = Harness::with_text("i = 0\nidx = 1\n", 60, 10);
+        h.app
+            .buf_mut()
+            .set_cursor(Position { line: 2, col: 0 }, false);
+        h.type_str("G $i");
+        h.key(KeyCode::Enter);
+        assert_eq!(h.app.buf().line_text(2), "G $i", "not rewritten to $idx");
+        assert_eq!(h.app.buf().cursor().line, 3);
+    }
+
+    #[test]
+    fn a_hidden_sidebar_cannot_take_focus() {
+        let mut h = Harness::with_text("", 40, 12); // < SIDEBAR_MIN_TOTAL_WIDTH
+        h.key(KeyCode::F(2));
+        assert_eq!(h.app.focus, crate::app::Focus::Editor);
+        h.type_str("ok");
+        assert_eq!(h.app.buf().line_text(0), "ok");
+    }
+
+    #[test]
+    fn overlay_clicks_map_to_the_rows_on_screen() {
+        use crate::ui::projects::{ProjectsAction, ProjectsPicker};
+        let recent: Vec<std::path::PathBuf> = (0..20).map(|i| format!("/p{i}").into()).collect();
+        let mut p = ProjectsPicker::new(recent);
+        p.scroll(14); // scrolled: rows 3..=14 are on screen
+        let outer = ratatui::layout::Rect::new(0, 0, 64, 15);
+        // Row 3 is the second recent project (rows 0-1 are the two actions).
+        assert!(
+            matches!(p.click(outer, 1), ProjectsAction::OpenRecent(ref path) if path.as_os_str() == "/p1"),
+            "the first visible row, not row 0"
+        );
+        assert!(
+            matches!(p.click(outer, 14), ProjectsAction::Stay),
+            "bottom border"
+        );
+
+        let mut h = Harness::new(100, 30);
+        h.ctrl('p');
+        let r = h.app.overlay_rect.unwrap();
+        h.click(r.x + 5, r.y + r.height - 1); // bottom border, below the last row
+        assert!(
+            matches!(h.app.overlay, crate::ui::overlay::Overlay::Palette(_)),
+            "a click on the border ran a hidden entry"
+        );
+    }
+
+    #[test]
+    fn snippet_preview_clicks_do_not_insert() {
+        let mut h = Harness::new(100, 30);
+        h.key(KeyCode::F(3));
+        let r = h.app.overlay_rect.unwrap();
+        h.click(r.x + 40, r.y + 3); // in the preview pane
+        assert!(matches!(
+            h.app.overlay,
+            crate::ui::overlay::Overlay::SnippetPicker(_)
+        ));
+        assert_eq!(h.app.buf().line_text(0), "");
+    }
+
+    #[test]
+    fn the_last_snippet_is_reachable_on_screen() {
+        for height in [30, 12] {
+            let mut h = Harness::new(100, height);
+            h.key(KeyCode::F(3));
+            h.key(KeyCode::End);
+            assert!(
+                h.contains("exit with code"),
+                "{height} rows:\n{}",
+                h.screen()
+            );
+        }
+    }
 }

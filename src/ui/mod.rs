@@ -38,8 +38,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_tabs = app.buffers.len() > 1;
     let show_panel = app.run.is_some();
     let show_search = app.search.is_some();
-    let show_algo = app.show_algo && area.width >= SIDEBAR_MIN_TOTAL_WIDTH;
-    let show_files = app.show_files && area.width >= SIDEBAR_MIN_TOTAL_WIDTH;
+    app.sidebars_fit = area.width >= SIDEBAR_MIN_TOTAL_WIDTH;
+    let show_algo = app.show_algo && app.sidebars_fit;
+    let show_files = app.show_files && app.sidebars_fit;
+    // Keys would go to a pane that isn't drawn.
+    if !app.sidebars_fit && matches!(app.focus, Focus::Files | Focus::Algo) {
+        app.focus = Focus::Editor;
+        app.set_status(format!(
+            "too narrow for the sidebar — it needs {SIDEBAR_MIN_TOTAL_WIDTH} columns"
+        ));
+    }
     let show_sidebar = show_algo || show_files;
 
     let mut rows = Vec::new();
@@ -363,6 +371,18 @@ fn scroll_into_view(sel: usize, cur: usize, h: usize) -> usize {
     }
 }
 
+/// For overlay hit-tests: the offset of `row` into a list drawn from
+/// `body_top`, if the click landed on one of its (at most `max_rows`) visible
+/// rows. Blank rows below the list, footers and the bottom border don't count.
+pub fn visible_row(outer: Rect, body_top: u16, row: u16, max_rows: usize) -> Option<usize> {
+    let bottom = (outer.y + outer.height).saturating_sub(1); // the bottom border row
+    if row < body_top || row >= bottom {
+        return None;
+    }
+    let off = (row - body_top) as usize;
+    (off < max_rows).then_some(off)
+}
+
 /// Panel height: the user's dragged value, else a third of the screen, always
 /// leaving the editor at least `MIN_EDITOR_ROWS` (plus the splitter and status).
 pub fn panel_height(app: &App, area: Rect) -> u16 {
@@ -377,5 +397,6 @@ pub fn panel_height(app: &App, area: Rect) -> u16 {
     let want = app
         .panel_height
         .unwrap_or_else(|| ((area.height as usize) / 3).clamp(6, 16) as u16);
-    want.clamp(3, max)
+    // `max` can be under 3 on a very short terminal, and `clamp` panics on min > max.
+    want.max(3).min(max)
 }

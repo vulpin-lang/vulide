@@ -91,6 +91,9 @@ pub struct App {
 
     // ---- file tree (F2) ----
     pub show_files: bool,
+    /// Whether the terminal is wide enough to draw the sidebars at all (set by
+    /// `ui::draw`). When it isn't, they can't take focus either.
+    pub sidebars_fit: bool,
     /// Built when the sidebar first opens; never rebuilt per frame (it is disk
     /// I/O). Mutated on expand/collapse/refresh.
     pub file_tree: Option<crate::filetree::FileTree>,
@@ -199,6 +202,7 @@ impl App {
             algo_scroll: 0,
             algo_rect: None,
             show_files,
+            sidebars_fit: true,
             file_tree: None,
             files_selected: 0,
             files_scroll: 0,
@@ -952,10 +956,10 @@ impl App {
     /// always available; the others only when their sidebar/panel is shown.
     fn focus_cycle(&self) -> Vec<Focus> {
         let mut v = vec![Focus::Editor];
-        if self.show_files {
+        if self.show_files && self.sidebars_fit {
             v.push(Focus::Files);
         }
-        if self.show_algo {
+        if self.show_algo && self.sidebars_fit {
             v.push(Focus::Algo);
         }
         if self.run.is_some() {
@@ -1524,7 +1528,7 @@ impl App {
                     PaletteOutcome::Cancel => self.overlay = Overlay::None,
                     PaletteOutcome::Stay => {}
                 },
-                Overlay::SnippetPicker(p) => match p.click(rect, row) {
+                Overlay::SnippetPicker(p) => match p.click(rect, col, row) {
                     SnippetOutcome::Insert(body) => {
                         self.overlay = Overlay::None;
                         self.buf_mut().insert_str(body);

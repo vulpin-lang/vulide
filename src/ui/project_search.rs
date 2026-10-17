@@ -151,11 +151,9 @@ impl ProjectSearch {
     /// the case/regex indicator line sit above it.
     fn row_at(&self, outer: Rect, row: u16) -> Option<usize> {
         let body_top = outer.y + 3;
-        if row < body_top {
-            return None;
-        }
+        let off = super::visible_row(outer, body_top, row, MAX_ROWS)?;
         let top = self.selected.saturating_sub(MAX_ROWS - 1);
-        let idx = top + (row - body_top) as usize;
+        let idx = top + off;
         (idx < self.matches.len()).then_some(idx)
     }
 
@@ -207,10 +205,28 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = e.path();
         if e.file_type().is_ok_and(|t| t.is_dir()) {
             collect_files(&path, out);
-        } else {
+        } else if std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            // Regular files only (following symlinks): reading a FIFO blocks
+            // forever, and a link to /dev/zero never ends.
             out.push(path);
         }
     }
+}
+
+/// The file as text, or `None` past `MAX_FILE_BYTES` (enforced on the read
+/// itself, not just the size metadata claims) or when it isn't UTF-8.
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 pub struct RunResult {
@@ -253,11 +269,8 @@ pub fn run(root: &Path, query: &str, case_sensitive: bool, regex: bool) -> RunRe
                 error: None,
             };
         }
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue; // binary / not UTF-8 — skip rather than error
+        let Some(text) = read_capped(&path) else {
+            continue; // too big, binary / not UTF-8, or unreadable — skip
         };
         for (line_no, line) in text.lines().enumerate() {
             for (col, _) in matcher.find_in_line(line) {

@@ -149,11 +149,9 @@ impl Palette {
     /// One border row plus the `> query` line sit above the list.
     fn row_at(&self, outer: Rect, row: u16) -> Option<usize> {
         let body_top = outer.y + 2;
-        if row < body_top {
-            return None;
-        }
+        let off = super::visible_row(outer, body_top, row, MAX_ROWS)?;
         let top = self.selected.saturating_sub(MAX_ROWS - 1);
-        let idx = top + (row - body_top) as usize;
+        let idx = top + off;
         (idx < self.filtered.len()).then_some(idx)
     }
 
