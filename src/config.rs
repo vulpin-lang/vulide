@@ -3,7 +3,8 @@
 //! Mirrors the keys of the Python IDE's `DEFAULT_SETTINGS` that make sense for a
 //! terminal build. Anything the file omits keeps its default; an unreadable or
 //! malformed file falls back to defaults with a warning on the status bar (the
-//! editor never refuses to start over a bad config).
+//! editor never refuses to start over a bad config). The app then won't save
+//! over that file, so a typo can't cost the user the rest of their settings.
 
 use std::path::{Path, PathBuf};
 
@@ -69,12 +70,10 @@ impl Default for Config {
 }
 
 impl Config {
-    /// `$XDG_CONFIG_HOME/vulide/config.toml`, else `$HOME/.config/vulide/…`.
+    /// `$XDG_CONFIG_HOME/vulide/config.toml`, else `~/.config/vulide/…`
+    /// (`%APPDATA%\vulide\…` on Windows).
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        let base = user_dir("XDG_CONFIG_HOME", "APPDATA", &[".config"])?;
         Some(base.join("vulide").join("config.toml"))
     }
 
@@ -141,6 +140,22 @@ impl Config {
         self.recent_projects_limit = self.recent_projects_limit.clamp(1, 100);
         self.recent_projects.truncate(self.recent_projects_limit);
     }
+}
+
+/// A per-user base directory: `$xdg_var` when set to an absolute path, else on
+/// Windows `%win_var%` (which, unlike `HOME`, Windows always sets), else the
+/// home directory joined with `unix_fallback`.
+pub fn user_dir(xdg_var: &str, win_var: &str, unix_fallback: &[&str]) -> Option<PathBuf> {
+    let absolute = |v: std::ffi::OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
+    if let Some(dir) = std::env::var_os(xdg_var).and_then(absolute) {
+        return Some(dir);
+    }
+    if cfg!(windows) {
+        return std::env::var_os(win_var).and_then(absolute);
+    }
+    let mut dir = std::env::home_dir()?;
+    dir.extend(unix_fallback);
+    Some(dir)
 }
 
 fn first_line(s: &str) -> String {

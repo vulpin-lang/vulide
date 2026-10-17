@@ -2118,4 +2118,227 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ---- regressions from the review of the core modules ----
+
+    #[test]
+    fn broken_config_is_never_saved_over() {
+        let mut h = Harness::new(60, 8);
+        h.app.config_broken = true;
+        h.app
+            .open_path(std::path::PathBuf::from("Cargo.toml"))
+            .unwrap();
+        assert!(
+            h.app.status.contains("not saving over it"),
+            "status: {}",
+            h.app.status
+        );
+    }
+
+    #[test]
+    fn events_from_a_replaced_run_are_ignored() {
+        let mut h = Harness::new(60, 20);
+        h.app.start_run_argv(vec!["sleep".into(), "30".into()]);
+        let old = h.app.run.as_ref().unwrap().id;
+        h.app.start_run_argv(vec!["cat".into()]); // replaces (and kills) the sleep
+        let new = h.app.run.as_ref().unwrap().id;
+        assert_ne!(old, new);
+
+        h.app.handle_event(AppEvent::Output {
+            run: old,
+            stream: crate::event::OutputStream::Stdout,
+            line: "from the old run".into(),
+        });
+        // The old run's two EOFs used to count against the new console and
+        // block the UI thread in wait() on `cat`, which is still running.
+        for stream in [
+            crate::event::OutputStream::Stdout,
+            crate::event::OutputStream::Stderr,
+        ] {
+            h.app
+                .handle_event(AppEvent::StreamClosed { run: old, stream });
+        }
+        h.pump();
+        let r = h.app.run.as_ref().unwrap();
+        assert!(r.rows.is_empty(), "stale output landed on the new run");
+        assert!(
+            r.is_running(),
+            "the new run was reaped by the old run's events"
+        );
+    }
+
+    #[test]
+    fn a_child_that_closes_its_output_early_is_reaped_later() {
+        let mut h = Harness::new(60, 20);
+        h.app.start_run_argv(vec![
+            "sh".into(),
+            "-c".into(),
+            "exec >&- 2>&-; sleep 0.3; exit 4".into(),
+        ]);
+        let done = h.pump_until(Duration::from_secs(5), |a| {
+            a.run.as_ref().is_some_and(|r| r.exit_code == Some(4))
+        });
+        assert!(done, "exit code never arrived:\n{}", h.screen());
+        assert!(h.app.status.contains("exit 4"), "status: {}", h.app.status);
+    }
+
+    #[test]
+    fn stdin_to_a_child_that_never_reads_does_not_block() {
+        let mut h = Harness::new(60, 20);
+        h.app.start_run_argv(vec!["sleep".into(), "30".into()]);
+        let line = "x".repeat(1023);
+        let t = std::time::Instant::now();
+        for _ in 0..512 {
+            // 512 KiB, far past the ~64 KiB pipe buffer
+            h.app.run.as_mut().unwrap().send_stdin(&line);
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "send_stdin blocked for {:?}",
+            t.elapsed()
+        );
+        h.app.stop_run();
+    }
+
+    #[test]
+    fn home_in_the_output_panel_after_scrolling_up() {
+        let mut h = Harness::new(60, 12);
+        h.app
+            .start_run_argv(vec!["seq".into(), "1".into(), "50".into()]);
+        wait_for_exit(&mut h);
+        h.app.focus = crate::app::Focus::Output;
+        h.key(KeyCode::Up);
+        h.key(KeyCode::Home); // was `1 + usize::MAX`: a panic in debug builds
+        let r = h.app.run.as_ref().unwrap();
+        assert_eq!(r.scroll, r.rows.len());
+    }
+
+    #[test]
+    fn delete_guard_refuses_home_and_its_ancestors() {
+        let h = Harness::new(40, 6);
+        let home = std::fs::canonicalize(std::env::home_dir().unwrap()).unwrap();
+        for p in home.ancestors() {
+            assert!(
+                h.app.refuse_delete(p).is_some(),
+                "{} should be refused",
+                p.display()
+            );
+        }
+        let top_level = std::fs::canonicalize("/usr").unwrap();
+        assert!(h.app.refuse_delete(&top_level).is_some());
+    }
+
+    #[test]
+    fn user_dir_falls_back_to_the_home_directory() {
+        let dir =
+            crate::config::user_dir("VULIDE_TEST_UNSET_1", "VULIDE_TEST_UNSET_2", &[".config"]);
+        if cfg!(windows) {
+            assert_eq!(dir, None);
+        } else {
+            assert_eq!(dir, Some(std::env::home_dir().unwrap().join(".config")));
+        }
+    }
+
+    #[test]
+    fn a_relative_path_opens_once_and_is_stored_absolute() {
+        let mut h = Harness::new(60, 8);
+        h.app
+            .open_path(std::path::PathBuf::from("Cargo.toml"))
+            .unwrap();
+        h.app
+            .open_path(std::path::PathBuf::from("./src/../Cargo.toml"))
+            .unwrap();
+        assert_eq!(h.app.buffers.len(), 1, "the same file opened twice");
+        assert!(h.app.buf().path().unwrap().is_absolute());
+    }
+
+    #[test]
+    fn replace_moves_past_a_replacement_that_contains_the_query() {
+        let mut h = Harness::with_text("a a a", 60, 12);
+        h.ctrl('f');
+        h.type_str("a");
+        h.key(KeyCode::Tab);
+        h.type_str("ab");
+        for _ in 0..3 {
+            h.ctrl('r');
+        }
+        assert_eq!(h.app.buf().line_text(0), "ab ab ab");
+    }
+
+    #[test]
+    fn switching_to_an_open_tab_closes_the_find_bar() {
+        let mut h = Harness::new(60, 12);
+        h.app
+            .open_path(std::path::PathBuf::from("Cargo.toml"))
+            .unwrap();
+        h.app
+            .open_path(std::path::PathBuf::from("README.md"))
+            .unwrap();
+        h.ctrl('f');
+        h.type_str("Vulide");
+        assert!(!h.app.search_matches.is_empty());
+        h.app
+            .open_path(std::path::PathBuf::from("Cargo.toml"))
+            .unwrap(); // already open
+        assert!(h.app.search.is_none());
+        assert!(h.app.search_matches.is_empty());
+    }
+
+    #[test]
+    fn word_left_stops_at_one_char_words() {
+        use crate::buffer::movement::word_left;
+        let rope = ropey::Rope::from_str("x = a\nfoo(a");
+        let at = |line, col| Position { line, col };
+        assert_eq!(word_left(&rope, at(0, 5)), at(0, 4));
+        assert_eq!(word_left(&rope, at(0, 4)), at(0, 2));
+        assert_eq!(word_left(&rope, at(0, 2)), at(0, 0));
+        assert_eq!(word_left(&rope, at(1, 5)), at(1, 4));
+        assert_eq!(word_left(&rope, at(1, 4)), at(1, 3));
+        assert_eq!(
+            word_left(&rope, at(1, 0)),
+            at(0, 5),
+            "crosses to the previous line"
+        );
+    }
+
+    #[test]
+    fn revision_tracks_text_changes_only() {
+        let mut b = Buffer::from_str("abc");
+        let r0 = b.revision();
+        b.set_cursor(Position { line: 0, col: 2 }, false);
+        assert_eq!(b.revision(), r0, "moving the cursor is not an edit");
+        b.insert_char('x');
+        let r1 = b.revision();
+        assert_ne!(r1, r0);
+        b.undo();
+        assert_ne!(b.revision(), r1, "undo changes the text too");
+        assert_ne!(
+            Buffer::from_str("abc").revision(),
+            r0,
+            "unique across buffers"
+        );
+    }
+
+    #[test]
+    fn outline_and_lint_follow_edits_but_skip_idle_redraws() {
+        let mut h = Harness::with_text("F greet\n~\n", 80, 14);
+        h.key(KeyCode::F(7));
+        assert_eq!(h.app.algo_items.len(), 1);
+        let rev = h.app.algo_rev;
+        h.draw();
+        assert_eq!(h.app.algo_rev, rev, "an idle redraw reuses the outline");
+
+        h.app
+            .buf_mut()
+            .set_cursor(Position { line: 2, col: 0 }, false);
+        h.key(KeyCode::Esc);
+        h.type_str("F other");
+        assert_eq!(h.app.algo_items.len(), 2, "the outline picked up the edit");
+
+        h.type_str("\nG $nope");
+        assert!(
+            h.app.diagnostics.iter().any(|d| d.message.contains("nope")),
+            "the lint picked up the edit"
+        );
+    }
 }

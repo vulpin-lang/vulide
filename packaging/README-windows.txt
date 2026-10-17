@@ -26,8 +26,9 @@ THE "RUN" FEATURE (F5)
 F5 runs the current file through the Vulpin interpreter. It looks for, in order:
   vulpin.exe on PATH  (it is a C program — no python fallback)
 If none is found it just says so on the status bar — the editor still works.
-You can also set an explicit path in %APPDATA%\..\.config\vulide\config.toml
-(key: vulpin_path), or wherever XDG_CONFIG_HOME points.
+You can also set an explicit path in %APPDATA%\vulide\config.toml
+(key: vulpin_path), or under XDG_CONFIG_HOME if you set it. The last
+session's open files are kept in %LOCALAPPDATA%\vulide\session.toml.
 
 KEYS
 ----

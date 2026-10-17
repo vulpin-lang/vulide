@@ -9,6 +9,7 @@ pub mod movement;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ropey::Rope;
 
@@ -16,6 +17,13 @@ use history::History;
 use movement as mv;
 
 use crate::syntax::Language;
+
+/// Buffers keep the canonical path, not whatever relative or `..` form it was
+/// opened by: the already-open check, the session file and the run console's
+/// working directory all compare or resolve it later, from anywhere.
+fn stored_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -29,8 +37,21 @@ pub struct Position {
 /// which tells e.g. `T` (try) from `T fn list` (filter).
 const BLOCK_OPENERS: &[char] = &['?', '@', 'O', 'F', 'T', 'W', 'V', 'N', ':'];
 
+/// Source of [`Buffer::revision`] values — global, so a value is never
+/// reused by another buffer either.
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct Buffer {
+    /// Mutate only through [`Buffer::edit`] (or reassign + `touch`), which
+    /// keeps `revision` honest.
     rope: Rope,
+    /// Changes whenever the text does. Per-frame consumers (the outline, the
+    /// lint) cache on it instead of rescanning the whole buffer every draw.
+    revision: u64,
     /// Content as of the last load/save. `is_dirty()` compares against it, so
     /// undoing back to the saved state clears the modified marker.
     saved: Rope,
@@ -67,6 +88,7 @@ impl Buffer {
         Self {
             saved: rope.clone(),
             rope,
+            revision: next_revision(),
             cursor: Position::default(),
             anchor: None,
             goal_col: None,
@@ -94,7 +116,7 @@ impl Buffer {
             }
         }
         let mut buf = Self::from_str(&text);
-        buf.path = Some(path.to_path_buf());
+        buf.path = Some(stored_path(path));
         buf.language = Language::from_path(path);
         Ok(buf)
     }
@@ -114,7 +136,7 @@ impl Buffer {
             text.push('\n');
         }
         fs::write(path, text)?;
-        self.path = Some(path.to_path_buf());
+        self.path = Some(stored_path(path));
         self.language = Language::from_path(path);
         self.saved = self.rope.clone();
         self.history.set_break();
@@ -282,7 +304,7 @@ impl Buffer {
         };
         let (a, b) = (self.char_index(start), self.char_index(end));
         self.history.record(&self.rope, self.cursor, false);
-        self.rope.remove(a..b);
+        self.edit().remove(a..b);
         self.anchor = None;
         self.cursor = start;
         self.history.set_break();
@@ -311,7 +333,7 @@ impl Buffer {
 
         self.history.record(&self.rope, self.cursor, true);
         let idx = self.char_index(self.cursor);
-        self.rope.insert_char(idx, ch);
+        self.edit().insert_char(idx, ch);
         self.cursor = self.pos_after(idx + 1);
 
         // Auto-type the partner, leaving the cursor between the pair.
@@ -321,7 +343,7 @@ impl Buffer {
             && let Some(&(_, close)) = AUTO_PAIRS.iter().find(|&&(open, _)| open == ch)
         {
             let cidx = self.char_index(self.cursor);
-            self.rope.insert_char(cidx, close);
+            self.edit().insert_char(cidx, close);
         }
     }
 
@@ -355,7 +377,7 @@ impl Buffer {
         self.delete_selection();
         self.history.record(&self.rope, self.cursor, false);
         let idx = self.char_index(self.cursor);
-        self.rope.insert(idx, text);
+        self.edit().insert(idx, text);
         self.cursor = self.pos_after(idx + text.chars().count());
         self.history.set_break();
     }
@@ -385,7 +407,7 @@ impl Buffer {
         insert.extend(std::iter::repeat_n(' ', extra));
 
         let idx = self.char_index(self.cursor);
-        self.rope.insert(idx, &insert);
+        self.edit().insert(idx, &insert);
         self.cursor = self.pos_after(idx + insert.chars().count());
         self.history.set_break();
     }
@@ -406,7 +428,7 @@ impl Buffer {
             let next = mv::right(&self.rope, self.cursor);
             let (x, z) = (self.char_index(prev), self.char_index(next));
             self.history.record(&self.rope, self.cursor, false);
-            self.rope.remove(x..z);
+            self.edit().remove(x..z);
             self.cursor = prev;
             self.history.set_break();
             return;
@@ -417,7 +439,7 @@ impl Buffer {
         }
         let (a, b) = (self.char_index(prev), self.char_index(self.cursor));
         self.history.record(&self.rope, self.cursor, false);
-        self.rope.remove(a..b);
+        self.edit().remove(a..b);
         self.cursor = prev;
         self.history.set_break();
     }
@@ -433,7 +455,7 @@ impl Buffer {
         }
         let (a, b) = (self.char_index(self.cursor), self.char_index(next));
         self.history.record(&self.rope, self.cursor, false);
-        self.rope.remove(a..b);
+        self.edit().remove(a..b);
         self.history.set_break();
     }
 
@@ -476,7 +498,7 @@ impl Buffer {
             format!("\n{block}")
         };
         self.history.record(&self.rope, self.cursor, false);
-        self.rope.insert(end, &insert);
+        self.edit().insert(end, &insert);
         self.cursor = Position {
             line: line + 1,
             col: self.cursor.col,
@@ -520,10 +542,10 @@ impl Buffer {
         self.history.record(&self.rope, self.cursor, false);
         // The `b` range sits later in the rope — rewrite it first so `a`'s
         // indices (both before it) stay valid no matter how the lengths differ.
-        self.rope.remove(b_start..b_end);
-        self.rope.insert(b_start, &text_a);
-        self.rope.remove(a_start..a_end);
-        self.rope.insert(a_start, &text_b);
+        self.edit().remove(b_start..b_end);
+        self.edit().insert(b_start, &text_a);
+        self.edit().remove(a_start..a_end);
+        self.edit().insert(a_start, &text_b);
         self.cursor = Position {
             line: target,
             col: self.cursor.col,
@@ -561,11 +583,11 @@ impl Buffer {
                     .take_while(|c| *c == ' ')
                     .count();
                 if removed > 0 {
-                    self.rope.remove(idx..idx + removed);
+                    self.edit().remove(idx..idx + removed);
                 }
                 delta[line - start_line] = -(removed as isize);
             } else {
-                self.rope.insert(idx, &pad);
+                self.edit().insert(idx, &pad);
                 delta[line - start_line] = self.tab_width as isize;
             }
         }
@@ -602,8 +624,8 @@ impl Buffer {
         let mut top_end = 0;
         for &(start, end) in sorted.iter().rev() {
             let (i, j) = (self.char_index(start), self.char_index(end));
-            self.rope.remove(i..j);
-            self.rope.insert(i, with);
+            self.edit().remove(i..j);
+            self.edit().insert(i, with);
             top_end = i + with_len; // last iteration = smallest offset
         }
         self.cursor = self.pos_after(top_end);
@@ -613,9 +635,25 @@ impl Buffer {
         sorted.len()
     }
 
+    /// The rope, for changing it; bumps the revision.
+    fn edit(&mut self) -> &mut Rope {
+        self.touch();
+        &mut self.rope
+    }
+
+    fn touch(&mut self) {
+        self.revision = next_revision();
+    }
+
+    /// Changes whenever the text does (edit, undo, redo); unique across buffers.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn undo(&mut self) -> bool {
         if let Some((rope, cursor)) = self.history.undo(&self.rope, self.cursor) {
             self.rope = rope;
+            self.touch();
             self.cursor = mv::clamp(&self.rope, cursor);
             self.anchor = None;
             self.goal_col = None;
@@ -628,6 +666,7 @@ impl Buffer {
     pub fn redo(&mut self) -> bool {
         if let Some((rope, cursor)) = self.history.redo(&self.rope, self.cursor) {
             self.rope = rope;
+            self.touch();
             self.cursor = mv::clamp(&self.rope, cursor);
             self.anchor = None;
             self.goal_col = None;

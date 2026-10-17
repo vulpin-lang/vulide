@@ -55,6 +55,9 @@ pub struct App {
     pub buffers: Vec<Buffer>,
     pub active: usize,
     pub config: Config,
+    /// The config file exists but couldn't be loaded. Saving now would replace
+    /// it with defaults, so `save_config` refuses until a reload succeeds.
+    pub(crate) config_broken: bool,
     pub theme: Theme,
     pub themes: Vec<Theme>,
     pub theme_idx: usize,
@@ -73,10 +76,14 @@ pub struct App {
 
     /// Undefined-variable warnings, recomputed each draw.
     pub diagnostics: Vec<crate::lint::Diagnostic>,
+    /// `Buffer::revision` that `diagnostics` was computed from (`None` = stale).
+    pub diagnostics_rev: Option<u64>,
 
     // ---- structure outline (F7) ----
     pub show_algo: bool,
     pub algo_items: Vec<crate::algo::Item>,
+    /// `Buffer::revision` that `algo_items` was built from (`None` = stale).
+    pub algo_rev: Option<u64>,
     pub algo_selected: usize,
     /// Index of the first outline row drawn (kept so mouse clicks map to rows).
     pub algo_scroll: usize,
@@ -149,6 +156,7 @@ impl App {
         let (config, warning) = Config::load();
         let mut app = Self::with_config(config);
         if let Some(w) = warning {
+            app.config_broken = true;
             app.set_status(w);
         }
         app
@@ -170,6 +178,7 @@ impl App {
             buffers: vec![Buffer::new()],
             active: 0,
             config,
+            config_broken: false,
             theme,
             themes,
             theme_idx,
@@ -182,8 +191,10 @@ impl App {
             panel_height: None,
             dragging_splitter: false,
             diagnostics: Vec::new(),
+            diagnostics_rev: None,
             show_algo,
             algo_items: Vec::new(),
+            algo_rev: None,
             algo_selected: 0,
             algo_scroll: 0,
             algo_rect: None,
@@ -246,6 +257,12 @@ impl App {
     }
 
     fn save_config(&mut self) {
+        if self.config_broken {
+            self.set_status(
+                "config.toml has an error — not saving over it (fix it, then Reload Config)",
+            );
+            return;
+        }
         // Never write a real config file from a test run.
         if cfg!(test) {
             return;
@@ -416,6 +433,8 @@ impl App {
             .position(|b| b.path().map(|p| p == canonical) == Some(true))
         {
             self.active = i;
+            self.completion = None;
+            self.dismiss_search_on_switch();
             self.set_status(format!("switched to {}", self.buffers[i].title()));
             return Ok(());
         }
@@ -501,22 +520,28 @@ impl App {
 
     /// Refuse to `remove_dir_all` a handful of catastrophic targets. Checked
     /// against the canonicalized path so `..`/symlinks can't sneak past it.
-    fn refuse_delete(&self, canonical: &Path) -> Option<String> {
+    /// The cwd and home are canonicalized too, so a symlinked `$HOME` (or
+    /// Windows' `\\?\` verbatim prefix from `canonicalize`) can't slip by.
+    pub(crate) fn refuse_delete(&self, canonical: &Path) -> Option<String> {
+        let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
         if let Ok(cwd) = std::env::current_dir()
-            && cwd.starts_with(canonical)
+            && resolve(cwd).starts_with(canonical)
         {
             return Some(
                 "refusing to delete: that's the current working directory (or contains it)"
                     .to_string(),
             );
         }
-        if let Some(home) = std::env::var_os("HOME")
-            && canonical == Path::new(&home)
+        if let Some(home) = std::env::home_dir()
+            && resolve(home).starts_with(canonical)
         {
-            return Some("refusing to delete your home directory".to_string());
+            return Some(
+                "refusing to delete your home directory (or a folder containing it)".to_string(),
+            );
         }
-        if canonical.parent().is_none() {
-            return Some("refusing to delete a filesystem root".to_string());
+        // A root, or a folder directly under one (`/usr`, `/etc`, `C:\Users`).
+        if canonical.parent().and_then(Path::parent).is_none() {
+            return Some("refusing to delete a filesystem root or a top-level folder".to_string());
         }
         if self.file_tree.as_ref().is_some_and(|t| t.root == canonical) {
             return Some(
@@ -787,6 +812,13 @@ impl App {
             }
             Cmd::ReloadConfig => {
                 let (cfg, warning) = Config::load();
+                if let Some(w) = warning {
+                    // Keep the settings in effect rather than swap in defaults.
+                    self.config_broken = true;
+                    self.set_status(w);
+                    return;
+                }
+                self.config_broken = false;
                 self.config = cfg;
                 self.apply_config();
                 if let Some(name) = self.themes.iter().position(|t| t.name == self.config.theme) {
@@ -1322,8 +1354,25 @@ impl App {
             .map(Search::replacement)
             .unwrap_or_default();
         self.buf_mut().replace_ranges(&[(start, end)], &with);
-        // The list shifts; keeping search_idx lands us on what was the next match.
+        // Move on to the first match after the inserted text. Keeping the index
+        // would land inside the replacement whenever it contains the query
+        // (`a` → `ab`), and every further replace would rewrite the same spot.
+        let after = match with.rsplit_once('\n') {
+            None => crate::buffer::Position {
+                line: start.line,
+                col: start.col + with.chars().count(),
+            },
+            Some((_, tail)) => crate::buffer::Position {
+                line: start.line + with.matches('\n').count(),
+                col: tail.chars().count(),
+            },
+        };
         self.recompute_matches();
+        self.search_idx = self
+            .search_matches
+            .iter()
+            .position(|(s, _)| *s >= after)
+            .unwrap_or(0);
         self.focus_current_match();
         let n = self.search_matches.len();
         self.set_status(match n {
@@ -1774,37 +1823,24 @@ impl App {
                 self.buf_mut().insert_str(&text);
                 self.clear_status();
             }
-            AppEvent::Output { stream, line } => {
-                if let Some(r) = &mut self.run {
+            // Events from a run that has since been replaced or closed are dropped.
+            AppEvent::Output { run, stream, line } => {
+                if let Some(r) = self.run.as_mut().filter(|r| r.id == run) {
                     r.on_output(stream, line);
                 }
             }
-            AppEvent::StreamClosed(_) => {
-                let done = if let Some(r) = &mut self.run {
-                    if r.on_stream_closed() {
-                        r.reap();
-                        r.close_stdin();
-                        Some((r.stopped, r.exit_code))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((stopped, code)) = done {
-                    self.set_status(match (stopped, code) {
-                        (true, _) => "run stopped".to_string(),
-                        (_, Some(0)) => "run finished (exit 0)".to_string(),
-                        (_, Some(c)) => format!("run finished (exit {c})"),
-                        (_, None) => "run finished".to_string(),
-                    });
-                    // The program is done — hand the keyboard back to the editor
-                    // unless the user is scrolled up reading the output.
-                    if self.focus == Focus::Output
-                        && self.run.as_ref().is_some_and(|r| r.scroll == 0)
-                    {
-                        self.focus = Focus::Editor;
-                    }
+            AppEvent::StreamClosed { run, .. } => {
+                if let Some(r) = self.run.as_mut().filter(|r| r.id == run)
+                    && r.on_stream_closed()
+                    && r.reap()
+                {
+                    self.on_run_finished();
+                }
+            }
+            AppEvent::Exited { run, code } => {
+                if let Some(r) = self.run.as_mut().filter(|r| r.id == run) {
+                    r.on_exited(code);
+                    self.on_run_finished();
                 }
             }
             AppEvent::InputClosed => {
@@ -1815,6 +1851,27 @@ impl App {
             AppEvent::Tick => return false,
         }
         true
+    }
+
+    /// The run's child has exited (both streams closed and the exit code reaped).
+    fn on_run_finished(&mut self) {
+        let done = self.run.as_mut().map(|r| {
+            r.close_stdin();
+            (r.stopped, r.exit_code)
+        });
+        if let Some((stopped, code)) = done {
+            self.set_status(match (stopped, code) {
+                (true, _) => "run stopped".to_string(),
+                (_, Some(0)) => "run finished (exit 0)".to_string(),
+                (_, Some(c)) => format!("run finished (exit {c})"),
+                (_, None) => "run finished".to_string(),
+            });
+            // The program is done — hand the keyboard back to the editor
+            // unless the user is scrolled up reading the output.
+            if self.focus == Focus::Output && self.run.as_ref().is_some_and(|r| r.scroll == 0) {
+                self.focus = Focus::Editor;
+            }
+        }
     }
 
     fn clear_status(&mut self) {

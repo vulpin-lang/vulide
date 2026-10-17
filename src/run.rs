@@ -5,14 +5,25 @@
 //! stdio is enough — no PTY. One reader thread per stream forwards lines onto
 //! the shared [`AppEvent`] channel; the app reaps the exit code once both
 //! streams hit EOF.
+//!
+//! Every event carries its run's id. Restarting a run drops the old console
+//! while its reader threads may still have lines and EOFs queued, and those
+//! must not land on the new console.
+//!
+//! Nothing here blocks the UI thread: stdin is written by its own thread (a
+//! child that never reads would otherwise wedge the editor once the pipe
+//! buffer fills), and a child that closes its output but keeps running is
+//! waited for off-thread too.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::event::{AppEvent, OutputStream};
 
@@ -61,16 +72,23 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
-/// A spawned child plus its stdin pipe and any temp file backing an unsaved
+/// Source of [`RunConsole::id`]s, so events from a replaced run can be told apart.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A spawned child plus its stdin writer and any temp file backing an unsaved
 /// buffer. Dropping it kills a still-running child and cleans the temp file.
 struct Runner {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    /// Shared with the exit waiter thread (see [`Runner::reap`]), which only
+    /// ever holds the lock for a `try_wait`.
+    child: Arc<Mutex<Child>>,
+    /// Lines for the stdin writer thread; dropping it closes the child's stdin.
+    stdin: Option<Sender<Vec<u8>>>,
     temp_file: Option<PathBuf>,
 }
 
 impl Runner {
     fn spawn(
+        run: u64,
         argv: &[String],
         workdir: &Path,
         temp_file: Option<PathBuf>,
@@ -87,25 +105,25 @@ impl Runner {
 
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let stdin = child.stdin.take();
-        spawn_reader(stdout, OutputStream::Stdout, tx.clone());
-        spawn_reader(stderr, OutputStream::Stderr, tx.clone());
+        let stdin = child.stdin.take().map(spawn_writer);
+        spawn_reader(run, stdout, OutputStream::Stdout, tx.clone());
+        spawn_reader(run, stderr, OutputStream::Stderr, tx.clone());
 
         Ok(Runner {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stdin,
             temp_file,
         })
     }
 
+    /// Queue a line for the child's stdin. Never blocks.
     fn send_line(&mut self, line: &str) -> std::io::Result<()> {
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("child stdin is closed"))?;
-        stdin.write_all(line.as_bytes())?;
-        stdin.write_all(b"\n")?;
-        stdin.flush()
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.stdin
+            .as_ref()
+            .and_then(|tx| tx.send(bytes).ok())
+            .ok_or_else(|| std::io::Error::other("child stdin is closed"))
     }
 
     /// Close stdin so a child blocked on `K` at EOF can finish.
@@ -114,18 +132,63 @@ impl Runner {
     }
 
     fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
-    fn try_reap(&mut self) -> Option<i32> {
-        self.child.wait().ok().map(|s| s.code().unwrap_or(-1))
+    /// The exit code if the child has exited. If it hasn't (it closed stdout
+    /// and stderr but kept running), returns `None` and starts a thread that
+    /// sends [`AppEvent::Exited`] once it does — `wait()` here would freeze
+    /// the UI for as long as the child lives.
+    fn reap(&mut self, run: u64, tx: &Sender<AppEvent>) -> Option<i32> {
+        if let Ok(Some(status)) = self
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_wait()
+        {
+            return Some(status.code().unwrap_or(-1));
+        }
+        let child = Arc::downgrade(&self.child);
+        let tx = tx.clone();
+        let _ = thread::Builder::new()
+            .name("vulide-wait".into())
+            .spawn(move || {
+                // Gone once the console is closed or replaced (Drop kills the child).
+                while let Some(child) = child.upgrade() {
+                    let status = child.lock().unwrap_or_else(|e| e.into_inner()).try_wait();
+                    match status {
+                        Ok(None) => {}
+                        Ok(Some(s)) => {
+                            let code = s.code().unwrap_or(-1);
+                            let _ = tx.send(AppEvent::Exited { run, code });
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = tx.send(AppEvent::Exited { run, code: -1 });
+                            return;
+                        }
+                    }
+                    drop(child);
+                    thread::sleep(Duration::from_millis(50));
+                }
+            });
+        None
     }
 }
 
 impl Drop for Runner {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
+        self.stdin = None;
+        let running = matches!(
+            self.child
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .try_wait(),
+            Ok(None)
+        );
+        if running {
             self.kill();
         }
         if let Some(path) = &self.temp_file {
@@ -134,7 +197,28 @@ impl Drop for Runner {
     }
 }
 
+/// Own the child's stdin on a thread of its own, writing whatever is queued.
+/// Ends (closing the pipe) when the sender is dropped or the child goes away.
+fn spawn_writer(mut stdin: std::process::ChildStdin) -> Sender<Vec<u8>> {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let _ = thread::Builder::new()
+        .name("vulide-stdin".into())
+        .spawn(move || {
+            for bytes in rx {
+                if stdin
+                    .write_all(&bytes)
+                    .and_then(|()| stdin.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    tx
+}
+
 fn spawn_reader<R: std::io::Read + Send + 'static>(
+    run: u64,
     src: R,
     stream: OutputStream,
     tx: Sender<AppEvent>,
@@ -153,14 +237,14 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
                             buf.pop();
                         }
                         let line = String::from_utf8_lossy(&buf).into_owned();
-                        if tx.send(AppEvent::Output { stream, line }).is_err() {
+                        if tx.send(AppEvent::Output { run, stream, line }).is_err() {
                             return;
                         }
                     }
                     Err(_) => break,
                 }
             }
-            let _ = tx.send(AppEvent::StreamClosed(stream));
+            let _ = tx.send(AppEvent::StreamClosed { run, stream });
         })
         .expect("spawn reader thread");
 }
@@ -173,7 +257,10 @@ pub struct OutputRow {
 
 /// State + rendering data for the output console panel.
 pub struct RunConsole {
+    /// Matches the `run` field of this console's events.
+    pub id: u64,
     runner: Option<Runner>,
+    tx: Sender<AppEvent>,
     pub rows: VecDeque<OutputRow>,
     open_streams: u8,
     /// `Some(code)` once the process has exited; `None` while running.
@@ -195,9 +282,12 @@ impl RunConsole {
         temp_file: Option<PathBuf>,
         tx: &Sender<AppEvent>,
     ) -> std::io::Result<RunConsole> {
-        let runner = Runner::spawn(&argv, workdir, temp_file, tx)?;
+        let id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
+        let runner = Runner::spawn(id, &argv, workdir, temp_file, tx)?;
         Ok(RunConsole {
+            id,
             runner: Some(runner),
+            tx: tx.clone(),
             rows: VecDeque::new(),
             open_streams: 2,
             exit_code: None,
@@ -246,14 +336,27 @@ impl RunConsole {
         self.open_streams == 0
     }
 
-    pub fn reap(&mut self) {
-        if let Some(runner) = &mut self.runner {
-            let code = runner.try_reap().unwrap_or(-1);
-            if !self.stopped {
-                self.exit_code = Some(code);
+    /// Both streams are closed: record the exit code. Returns `false` if the
+    /// child is still running; an [`AppEvent::Exited`] then follows, for
+    /// [`RunConsole::on_exited`].
+    pub fn reap(&mut self) -> bool {
+        let Some(runner) = &mut self.runner else {
+            return true;
+        };
+        match runner.reap(self.id, &self.tx) {
+            Some(code) => {
+                self.on_exited(code);
+                true
             }
-            self.elapsed = Some(self.started.elapsed());
+            None => false,
         }
+    }
+
+    pub fn on_exited(&mut self, code: i32) {
+        if !self.stopped {
+            self.exit_code = Some(code);
+        }
+        self.elapsed = Some(self.started.elapsed());
     }
 
     pub fn send_stdin(&mut self, line: &str) {
@@ -282,7 +385,7 @@ impl RunConsole {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
-        self.scroll = (self.scroll + n).min(self.rows.len());
+        self.scroll = self.scroll.saturating_add(n).min(self.rows.len());
     }
 
     pub fn scroll_down(&mut self, n: usize) {

@@ -211,25 +211,26 @@ fn class(c: char) -> u8 {
 }
 
 pub fn word_left(rope: &Rope, pos: Position) -> Position {
-    let mut p = pos;
-    // step back over whitespace, then over one run of the same class
-    let first = left(rope, p);
-    if first == p {
-        return p;
+    // At a line start, step to the end of the previous line.
+    if pos.col == 0 {
+        return left(rope, pos);
     }
-    p = first;
-    let line = line_text(rope, p.line);
-    let ch: Vec<char> = line.chars().collect();
-    while p.col > 0 && p.line == pos.line && class(ch[p.col - 1]) == 0 {
-        p.col -= 1;
+    // Otherwise step back over whitespace, then over one run of the same class.
+    let ch: Vec<char> = line_text(rope, pos.line).chars().collect();
+    let mut col = pos.col.min(ch.len());
+    while col > 0 && class(ch[col - 1]) == 0 {
+        col -= 1;
     }
-    if p.col > 0 && p.line == pos.line {
-        let target = class(ch[p.col - 1]);
-        while p.col > 0 && class(ch[p.col - 1]) == target {
-            p.col -= 1;
+    if col > 0 {
+        let target = class(ch[col - 1]);
+        while col > 0 && class(ch[col - 1]) == target {
+            col -= 1;
         }
     }
-    p
+    Position {
+        line: pos.line,
+        col,
+    }
 }
 
 pub fn word_right(rope: &Rope, pos: Position) -> Position {

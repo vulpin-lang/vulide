@@ -21,14 +21,10 @@ pub struct Session {
 }
 
 impl Session {
-    /// `$XDG_STATE_HOME/vulide/session.toml`, else `$HOME/.local/state/vulide/…`.
+    /// `$XDG_STATE_HOME/vulide/session.toml`, else `~/.local/state/vulide/…`
+    /// (`%LOCALAPPDATA%\vulide\…` on Windows).
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state"))
-            })?;
+        let base = crate::config::user_dir("XDG_STATE_HOME", "LOCALAPPDATA", &[".local", "state"])?;
         Some(base.join("vulide").join("session.toml"))
     }
 

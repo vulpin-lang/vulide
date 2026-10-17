@@ -68,15 +68,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     i += 1;
 
     // The outline + the undefined-var lint are Vulpin-specific grammar — off for
-    // Python / Rust / C / plain buffers. The outline is a pure function of the
-    // buffer so it's rebuilt every frame; the file tree is disk I/O and is built
-    // once in `toggle_files`, never here.
+    // Python / Rust / C / plain buffers. Both scan the whole buffer, so they're
+    // rebuilt only when its revision changes (an edit, undo, or tab switch),
+    // not on every keypress, mouse move and line of run output that redraws.
+    // The file tree is disk I/O and is built once in `toggle_files`, never here.
     let is_vulpin = app.buffers[app.active].language() == crate::syntax::Language::Vulpin;
-    app.algo_items = if show_algo && is_vulpin {
-        crate::algo::outline(&app.buffers[app.active])
+    let rev = app.buffers[app.active].revision();
+    if show_algo && is_vulpin {
+        if app.algo_rev != Some(rev) {
+            app.algo_items = crate::algo::outline(&app.buffers[app.active]);
+            app.algo_rev = Some(rev);
+        }
     } else {
-        Vec::new()
-    };
+        app.algo_items.clear();
+        app.algo_rev = None;
+    }
 
     let (sidebar_col, editor_area) = if show_sidebar {
         let w = if show_files {
@@ -171,11 +177,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.files_scroll = 0;
     }
 
-    app.diagnostics = if is_vulpin {
-        crate::lint::check(&app.buffers[app.active])
+    if is_vulpin {
+        if app.diagnostics_rev != Some(rev) {
+            app.diagnostics = crate::lint::check(&app.buffers[app.active]);
+            app.diagnostics_rev = Some(rev);
+        }
     } else {
-        Vec::new()
-    };
+        app.diagnostics.clear();
+        app.diagnostics_rev = None;
+    }
 
     app.editor_rows = editor_area.height as usize;
     let show_numbers = app.config.show_line_numbers;

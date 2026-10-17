@@ -26,13 +26,23 @@ pub enum AppEvent {
     Paste(String),
     Resize(u16, u16),
     Tick,
-    /// One line from the running child (newline already stripped).
+    /// One line from the running child (newline already stripped). `run` is
+    /// the [`crate::run::RunConsole::id`] it belongs to.
     Output {
+        run: u64,
         stream: OutputStream,
         line: String,
     },
     /// A child stream hit EOF; when both have, the app reaps the exit code.
-    StreamClosed(OutputStream),
+    StreamClosed {
+        run: u64,
+        stream: OutputStream,
+    },
+    /// A child that outlived its output streams has exited.
+    Exited {
+        run: u64,
+        code: i32,
+    },
     /// The input reader thread stopped (terminal went away).
     InputClosed,
 }
